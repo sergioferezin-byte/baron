@@ -1,0 +1,198 @@
+@import "tailwindcss";
+
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400&display=swap');
+
+@theme {
+  --font-serif: "Playfair Display", Georgia, serif;
+  --font-sans: "Inter", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+  
+  --color-barao-plum: #141312;
+  --color-barao-deep: #0A0A0A;
+  --color-barao-rose: #C5A059;
+  --color-barao-gold: #E5CD9D;
+  --color-barao-charcoal: #121212;
+}
+
+@layer utilities {
+  .animate-slow-pulse {
+    animation: slow-pulse 10s ease-in-out infinite;
+  }
+  .animate-breathing-heavy {
+    animation: breathing-heavy 6s ease-in-out infinite;
+  }
+  .animate-gold-glow {
+    animation: golden-pulsate-glow 2s ease-in-out infinite;
+  }
+  .immersive-border {
+    border: 1px solid rgba(197, 160, 89, 0.25);
+  }
+  .immersive-border-active {
+    border: 1px solid rgba(197, 160, 89, 0.6);
+  }
+  .immersive-corners {
+    position: relative;
+  }
+  .immersive-corners::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 12px;
+    height: 12px;
+    border-top: 2px solid #C5A059;
+    border-left: 2px solid #C5A059;
+    pointer-events: none;
+  }
+  .immersive-corners::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    right: 0;
+    width: 12px;
+    height: 12px;
+    border-bottom: 2px solid #C5A059;
+    border-right: 2px solid #C5A059;
+    pointer-events: none;
+  }
+}
+
+@keyframes slow-pulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.25;
+    filter: blur(40px);
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 0.45;
+    filter: blur(60px);
+  }
+}
+
+@keyframes breathing-heavy {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 40px rgba(197, 160, 89, 0.15);
+  }
+  40% {
+    transform: scale(1.06);
+    box-shadow: 0 0 65px rgba(197, 160, 89, 0.35);
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 40px rgba(197, 160, 89, 0.15);
+  }
+}
+
+@keyframes golden-pulsate-glow {
+  0%, 100% {
+    box-shadow: 0 0 16px rgba(197, 160, 89, 0.4), 0 0 30px rgba(229, 205, 157, 0.2);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 0 35px rgba(197, 160, 89, 0.9), 0 0 55px rgba(229, 205, 157, 0.5);
+    transform: scale(1.025);
+  }
+}
+
+@keyframes heartGlow {
+  0%, 100% {
+    box-shadow: 0 0 12px rgba(197, 160, 89, 0.16), inset 0 0 5px rgba(197, 160, 89, 0.05);
+    border-color: rgba(197, 160, 89, 0.18);
+    transform: scale(1);
+  }
+  12% {
+    box-shadow: 0 0 28px rgba(197, 160, 89, 0.65), inset 0 0 12px rgba(197, 160, 89, 0.2);
+    border-color: rgba(197, 160, 89, 0.45);
+    transform: scale(1.012);
+  }
+  24% {
+    box-shadow: 0 0 15px rgba(197, 160, 89, 0.25), inset 0 0 6px rgba(197, 160, 89, 0.08);
+    border-color: rgba(197, 160, 89, 0.25);
+    transform: scale(1.002);
+  }
+  36% {
+    box-shadow: 0 0 38px rgba(197, 160, 89, 0.8), inset 0 0 16px rgba(197, 160, 89, 0.26);
+    border-color: rgba(197, 160, 89, 0.55);
+    transform: scale(1.018);
+  }
+  65% {
+    box-shadow: 0 0 12px rgba(197, 160, 89, 0.16), inset 0 0 5px rgba(197, 160, 89, 0.05);
+    border-color: rgba(197, 160, 89, 0.18);
+    transform: scale(1);
+  }
+}
+
+.animate-heart-glow {
+  animation: heartGlow var(--heart-speed, 3.2s) infinite ease-in-out;
+}
+
+/* Custom scrollbar to keep layout elegant and neat */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0A0A0A;
+}
+::-webkit-scrollbar-thumb {
+  background: #1C1B1A;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #C5A059;
+}
+
+/* Enhancements for Mobile Legibility: Increase standard text sizes by 20% */
+@media (max-width: 768px) {
+  /* Scale standard utility font sizes by 20% */
+  .text-xs {
+    font-size: 0.9rem !important; /* from 0.75rem (12px) to 14.4px */
+  }
+  .text-sm {
+    font-size: 1.05rem !important; /* from 0.875rem (14px) to 16.8px */
+  }
+  .text-base {
+    font-size: 1.2rem !important; /* from 1rem (16px) to 19.2px */
+  }
+
+  /* Scale arbitrary custom utilities by 20% */
+  .text-\[8px\] {
+    font-size: 10px !important;
+  }
+  .text-\[8\.5px\] {
+    font-size: 10.5px !important;
+  }
+  .text-\[9px\] {
+    font-size: 11px !important;
+  }
+  .text-\[9\.5px\] {
+    font-size: 11.5px !important;
+  }
+  .text-\[10px\] {
+    font-size: 12px !important;
+  }
+  .text-\[11px\] {
+    font-size: 13.2px !important;
+  }
+  .text-\[12px\] {
+    font-size: 14.4px !important;
+  }
+  .text-\[13px\] {
+    font-size: 15.6px !important;
+  }
+  .text-\[14px\] {
+    font-size: 16.8px !important;
+  }
+
+  /* iOS Auto-Zoom prevention: ensure input fields are at least 16px */
+  input[type="text"], 
+  input[type="email"], 
+  input[type="password"], 
+  textarea, 
+  select {
+    font-size: 16px !important;
+  }
+}
+
+

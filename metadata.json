@@ -1,0 +1,6 @@
+{
+  "name": "Meu Barao",
+  "description": "Meu Barao une inteligencia emocional artificial, voz e acolhimento para criar conversas profundas, presenca e escuta compassiva.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

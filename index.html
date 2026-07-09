@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>My Google AI Studio App</title>
+    <script>
+      (function() {
+        // Intercept native WebSocket constructor to prevent Vite HMR connection attempts
+        const OriginalWebSocket = window.WebSocket;
+        
+        class DummyWebSocket extends EventTarget {
+          constructor(url, protocols) {
+            super();
+            this.url = url;
+            this.protocols = protocols;
+            this.readyState = 3; // CLOSED
+            this.bufferedAmount = 0;
+            this.extensions = "";
+            this.protocol = "";
+            this.binaryType = "blob";
+            
+            // Emulate standard onerror/onclose asynchronously without raising unhandled errors
+            setTimeout(() => {
+              const errEvt = new Event('error');
+              if (typeof this.onerror === 'function') {
+                try { this.onerror(errEvt); } catch(e) {}
+              }
+              try { this.dispatchEvent(errEvt); } catch(e) {}
+
+              const closeEvt = new CloseEvent('close', {
+                wasClean: false,
+                code: 1006,
+                reason: "WebSocket HMR disabled in dev environment"
+              });
+              if (typeof this.onclose === 'function') {
+                try { this.onclose(closeEvt); } catch(e) {}
+              }
+              try { this.dispatchEvent(closeEvt); } catch(e) {}
+            }, 10);
+          }
+          close() {}
+          send() {}
+        }
+
+        window.WebSocket = function(url, protocols) {
+          const urlStr = String(url);
+          // Intercept development websockets
+          if (urlStr.includes('ais-dev-') || urlStr.includes('ais-pre-') || urlStr.includes('localhost') || urlStr.includes('127.0.0.1')) {
+            return new DummyWebSocket(url, protocols);
+          }
+          try {
+            return new OriginalWebSocket(url, protocols);
+          } catch (e) {
+            return new DummyWebSocket(url, protocols);
+          }
+        };
+        window.WebSocket.prototype = OriginalWebSocket.prototype;
+
+        // Intercept log errors for benign Vite WebSocket issues
+        const originalError = console.error;
+        const originalWarn = console.warn;
+
+        console.error = function(...args) {
+          const msg = args.map(arg => String(arg)).join(' ');
+          if (msg.includes('[vite] failed to connect to websocket') || msg.includes('WebSocket closed without opened')) {
+            return;
+          }
+          originalError.apply(console, args);
+        };
+
+        console.warn = function(...args) {
+          const msg = args.map(arg => String(arg)).join(' ');
+          if (msg.includes('[vite] failed to connect to websocket') || msg.includes('WebSocket closed without opened')) {
+            return;
+          }
+          originalWarn.apply(console, args);
+        };
+
+        // Suppress Unhandled Rejections and Error events for WebSocket failures
+        window.addEventListener('unhandledrejection', function(event) {
+          const reasonMsg = event.reason ? (event.reason.message || String(event.reason)) : '';
+          if (reasonMsg.includes('WebSocket closed without opened') || reasonMsg.includes('failed to connect to websocket')) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+          }
+        }, true);
+
+        window.addEventListener('error', function(event) {
+          const errorMsg = event.message || '';
+          if (errorMsg.includes('failed to connect to websocket') || errorMsg.includes('WebSocket')) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+          }
+        }, true);
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
