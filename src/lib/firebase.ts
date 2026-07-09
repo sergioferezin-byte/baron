@@ -8,14 +8,14 @@ import { getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
 // Configurações do Firebase utilizando variáveis de ambiente seguras para Vite.
-// Os valores padrões são preenchidos apontando para o seu projeto 'meubarao-b049c'.
+// Nenhum valor possui default hardcoded: todas as chaves devem vir do .env.
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyCuGbFNRoKNDdertNjdodplkSNuoa-eXZ0",
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "meubarao-b049c.firebaseapp.com",
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "meubarao-b049c",
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "meubarao-b049c.firebasestorage.app",
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "1024630213933",
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:1024630213933:web:11aa178f30ffcfac17d7a4"
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID
 };
 
 let app: any = null;

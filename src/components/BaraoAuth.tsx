@@ -10,39 +10,9 @@ import { auth } from "../lib/firebase";
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, updateProfile, signInWithPopup, GoogleAuthProvider } from "firebase/auth";
 import { syncUserProfile } from "../utils/firebaseSync";
 
-// Default seed users for instant setup/login and demo testing
-const DEFAULT_USERS_KEY = "mb_users_list";
+// Cache de sessão apenas — nunca fonte de dados. A fonte real é Firebase Auth + Firestore
+// (ver syncUserProfile/getUserProfile em utils/firebaseSync.ts).
 const SESSION_USER_KEY = "mb_logged_user";
-
-const getSavedUsers = (): User[] => {
-  const data = localStorage.getItem(DEFAULT_USERS_KEY);
-  if (!data) {
-    const demoUser: User = {
-      id: "demo-visitante",
-      name: "Ana Luiza",
-      email: "visitante@meubarao.com",
-      password: "barao",
-      nickname: "Ana Querida",
-      preferredSound: "chuva",
-      createdAt: new Date().toISOString(),
-      plan: "premium",
-      tokens: 2500
-    };
-    localStorage.setItem(DEFAULT_USERS_KEY, JSON.stringify([demoUser]));
-    return [demoUser];
-  }
-  try {
-    return JSON.parse(data);
-  } catch (e) {
-    return [];
-  }
-};
-
-const saveUserToLocalStorage = (user: User) => {
-  const users = getSavedUsers();
-  users.push(user);
-  localStorage.setItem(DEFAULT_USERS_KEY, JSON.stringify(users));
-};
 
 interface BaraoAuthProps {
   onSuccess: (user: User) => void;
@@ -70,71 +40,8 @@ export default function BaraoAuth({ onSuccess, onClose, initialMode = "login", o
   const [loading, setLoading] = useState(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
-  // Google Authentication Listener and Handlers
-  React.useEffect(() => {
-    const handleGoogleMessage = (event: MessageEvent) => {
-      // Allow local and preview run app domains
-      const origin = event.origin;
-      if (!origin.endsWith(".run.app") && !origin.includes("localhost") && !origin.includes("127.0.0.1")) {
-        return;
-      }
-      if (event.data?.type === "GOOGLE_AUTH_SUCCESS") {
-        const { email: gEmail, name: gName } = event.data;
-        handleGoogleLoginSuccess(gEmail, gName);
-      }
-    };
-    window.addEventListener("message", handleGoogleMessage);
-    return () => window.removeEventListener("message", handleGoogleMessage);
-  }, []);
-
-  const handleGoogleLoginSuccess = (gEmail: string, gName: string) => {
-    setError(null);
-    setLoading(true);
-
-    setTimeout(() => {
-      const users = getSavedUsers();
-      let matchedUser = users.find((u) => u.email.toLowerCase() === gEmail.toLowerCase());
-
-      if (!matchedUser) {
-        // Sign up automatically with Google
-        const derivedNickname = gName.split(" ")[0] + " Querida";
-        matchedUser = {
-          id: auth?.currentUser?.uid || "usr-" + Math.random().toString(36).substr(2, 9),
-          name: gName,
-          email: gEmail,
-          password: "google_oauth_provider",
-          nickname: derivedNickname,
-          preferredSound: "chuva",
-          createdAt: new Date().toISOString(),
-          plan: 'free',
-          tokens: 100
-        };
-        saveUserToLocalStorage(matchedUser);
-      } else if (auth?.currentUser && matchedUser.id !== auth.currentUser.uid) {
-        // Synchronize with active Firebase UID
-        matchedUser.id = auth.currentUser.uid;
-        saveUserToLocalStorage(matchedUser);
-      }
-
-      setSuccessMsg(`Conectada via Google! Bem-vinda de volta, ${matchedUser.nickname || matchedUser.name}!`);
-      localStorage.setItem(SESSION_USER_KEY, JSON.stringify(matchedUser));
-
-      // Sincroniza em background os dados com o Firestore
-      if (auth && auth.currentUser) {
-        const pKey = `mb_user_profile_${matchedUser.id}`;
-        const pStr = localStorage.getItem(pKey);
-        const localProfile = pStr ? JSON.parse(pStr) : null;
-        syncUserProfile(matchedUser, localProfile).catch(err => {
-          console.warn("[FirebaseSync Google Profile] Warning syncing profile: ", err);
-        });
-      }
-
-      setTimeout(() => {
-        onSuccess(matchedUser!);
-      }, 1200);
-    }, 1000);
-  };
-
+  // Autenticação Google real via Firebase Auth (signInWithPopup). Sem fallback simulado:
+  // se o Firebase Auth não conseguir autenticar de verdade, mostramos erro ao usuário.
   const triggerGoogleAuth = async () => {
     setError(null);
     if (!acceptedTermsPrivacy) {
@@ -142,431 +49,51 @@ export default function BaraoAuth({ onSuccess, onClose, initialMode = "login", o
       return;
     }
 
-    setLoading(true);
-
-    // 1. Tenta Autenticação Real do Google via Firebase Auth se estiver disponível
-    if (auth) {
-      try {
-        const provider = new GoogleAuthProvider();
-        // Adiciona um dica de login personalizada se desejar
-        provider.setCustomParameters({ prompt: 'select_account' });
-        
-        const result = await signInWithPopup(auth, provider);
-        const fbUser = result.user;
-        if (fbUser && fbUser.email) {
-          handleGoogleLoginSuccess(fbUser.email, fbUser.displayName || fbUser.email.split("@")[0]);
-          return;
-        }
-      } catch (fbErr: any) {
-        console.warn("[Firebase Google Auth Popup] Fallback to simulated setup due to popup restriction:", fbErr.message);
-        
-        // Se o pop-up foi explicitamente bloqueado ou login foi cancelado, podemos prosseguir com o fallback local ou reportar
-        if (fbErr.code === "auth/popup-blocked" || fbErr.code === "auth/cancelled-popup-request") {
-          // let it fall back naturally
-        } else if (fbErr.code === "auth/operation-not-allowed") {
-          setError("O provedor Google ainda não está ativo no console do seu Firebase. Acesse Firebase Console -> Authentication -> Sign-in method e ative o Google.");
-          setLoading(false);
-          return;
-        } else {
-          setError(`Erro na sintonização Google: ${fbErr.message || fbErr}. Usando canais de simulação.`);
-        }
-      }
-    }
-
-    // 2. Fallback interativo simulado se o Firebase Auth estiver indisponível ou em sandbox iframe bloqueada
-    setLoading(false);
-    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-    
-    // For mobile devices, a wider popup bounds keeps browser control panels from squeezing content scale
-    const width = isMobile ? window.screen.width : 460;
-    const height = isMobile ? window.screen.height : 580;
-    const left = window.screen.width / 2 - width / 2;
-    const top = window.screen.height / 2 - height / 2;
-
-    const popupFeatures = isMobile
-      ? "status=no,resizable=yes,scrollbars=yes"
-      : `width=${width},height=${height},left=${left},top=${top},status=no,resizable=yes`;
-
-    const popup = window.open(
-      "",
-      "google_oauth",
-      popupFeatures
-    );
-
-    if (!popup) {
-      setError("O pop-up do Google foi bloqueado pelo seu navegador. Por favor, libere os pop-ups para este site.");
+    if (!auth) {
+      setError("Autenticação indisponível no momento. Tente novamente mais tarde.");
       return;
     }
 
-    const popupHtml = `
-      <!DOCTYPE html>
-      <html lang="pt-BR">
-      <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0">
-        <title>Fazer login com o Google</title>
-        <style>
-          * {
-            box-sizing: border-box;
-          }
-          body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background-color: #070707;
-            color: #E4E4E7;
-            margin: 0;
-            padding: 16px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            min-height: 100vh;
-            -webkit-text-size-adjust: 100%;
-          }
-          #main-content {
-            width: 100%;
-            max-width: 420px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            border: 1px solid rgba(197, 160, 89, 0.2);
-            border-radius: 4px;
-            padding: 36px 24px;
-            background-color: #0F0F0F;
-            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.7);
-          }
-          .logo {
-            display: flex;
-            justify-content: center;
-            margin-bottom: 20px;
-            background: rgba(255, 255, 255, 0.05);
-            padding: 10px;
-            border-radius: 50%;
-          }
-          .title {
-            font-size: 20px;
-            font-weight: 500;
-            color: #ffffff;
-            line-height: 1.3;
-            margin-bottom: 8px;
-            text-align: center;
-          }
-          .subtitle {
-            font-size: 13px;
-            color: #94A3B8;
-            margin-bottom: 26px;
-            text-align: center;
-          }
-          .account-box {
-            width: 100%;
-            border: 1px solid rgba(255, 255, 255, 0.05);
-            border-radius: 4px;
-            overflow: hidden;
-            margin-bottom: 24px;
-            background-color: #070707;
-          }
-          .account-item {
-            display: flex;
-            align-items: center;
-            padding: 16px;
-            min-height: 56px; /* Ensuring spacious 48px+ touch compliance */
-            cursor: pointer;
-            transition: all 0.2s;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-          }
-          .account-item:last-child {
-            border-bottom: none;
-          }
-          .account-item:hover, .account-item:active {
-            background-color: rgba(197, 160, 89, 0.05);
-          }
-          .avatar {
-            width: 36px;
-            height: 36px;
-            border-radius: 50%;
-            background-color: #C5A059;
-            color: #000000;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 16px;
-            font-weight: bold;
-            margin-right: 14px;
-            flex-shrink: 0;
-          }
-          .avatar-secondary {
-            background-color: #1F2937;
-            color: #9CA3AF;
-            border: 1px dashed rgba(255, 255, 255, 0.1);
-          }
-          .info {
-            display: flex;
-            flex-direction: column;
-            flex-grow: 1;
-            min-width: 0;
-          }
-          .name {
-            font-size: 14px;
-            font-weight: 550;
-            color: #F3F4F6;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-          }
-          .email {
-            font-size: 12px;
-            color: #6B7280;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            margin-top: 2px;
-          }
-          .footer {
-            font-size: 11px;
-            color: #64748B;
-            text-align: center;
-            line-height: 1.6;
-            margin-top: 16px;
-          }
-          .footer a {
-            color: #E2E8F0;
-            text-decoration: underline;
-          }
-          .footer a:hover {
-            color: #C5A059;
-          }
-          .connecting {
-            display: none;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            padding: 40px 24px;
-            text-align: center;
-            border: 1px solid rgba(197, 160, 89, 0.2);
-            border-radius: 4px;
-            background-color: #0F0F0F;
-            width: 100%;
-            max-width: 420px;
-          }
-          .spinner {
-            border: 3px solid rgba(255, 255, 255, 0.05);
-            border-top: 3px solid #C5A059;
-            border-radius: 50%;
-            width: 40px;
-            height: 40px;
-            animation: spin 0.8s linear infinite;
-            margin-bottom: 20px;
-          }
-          @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-          }
-          .input-form {
-            display: none;
-            flex-direction: column;
-            width: 100%;
-          }
-          .input-group {
-            position: relative;
-            margin-bottom: 18px;
-            width: 100%;
-          }
-          .input-field {
-            width: 100%;
-            height: 48px; /* Spacious finger height */
-            background-color: #070707;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 4px;
-            font-size: 14px;
-            color: #ffffff;
-            padding: 0 16px;
-            box-sizing: border-box;
-            outline: none;
-            transition: border-color 0.15s;
-          }
-          .input-field:focus {
-            border-color: #C5A059;
-          }
-          .button-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-top: 18px;
-            width: 100%;
-            gap: 12px;
-          }
-          .btn-text {
-            color: #94A3B8;
-            background: none;
-            border: none;
-            font-size: 13px;
-            font-weight: 550;
-            cursor: pointer;
-            height: 44px;
-            padding: 0 16px;
-            border-radius: 4px;
-            outline: none;
-            transition: all 0.2s;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-          }
-          .btn-text:hover, .btn-text:active {
-            background-color: rgba(255, 255, 255, 0.05);
-            color: #ffffff;
-          }
-          .btn-primary {
-            background-color: #C5A059;
-            color: #000000;
-            border: none;
-            font-size: 13px;
-            font-weight: 600;
-            cursor: pointer;
-            height: 44px;
-            padding: 0 24px;
-            border-radius: 4px;
-            transition: all 0.2s;
-            outline: none;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            flex-grow: 1;
-          }
-          .btn-primary:hover, .btn-primary:active {
-            background-color: #E5CD9D;
-            transform: translateY(-0.5px);
-          }
-          @media (max-width: 480px) {
-            body {
-              padding: 12px;
-              justify-content: center;
-              background-color: #070707;
-            }
-            #main-content, .connecting {
-              border: 1px solid rgba(197, 160, 89, 0.15);
-              padding: 24px 16px;
-              max-width: 100%;
-            }
-          }
-        </style>
-      </head>
-      <body>
-        <div id="main-content">
-          <div class="logo">
-            <svg width="22" height="22" viewBox="0 0 24 24">
-              <path fill="#4285F4" d="M23.745 12.27c0-.77-.07-1.54-.2-2.27H12v4.51h6.6c-.29 1.48-1.14 2.73-2.4 3.58v3h3.86c2.26-2.09 3.68-5.17 3.68-8.82z"/>
-              <path fill="#34A853" d="M12 24c3.24 0 5.97-1.08 7.96-2.91l-3.86-3c-1.08.72-2.45 1.16-4.1 1.16-3.14 0-5.8-2.11-6.75-4.96H1.31v3.09C3.26 21.3 7.37 24 12 24z"/>
-              <path fill="#FBBC05" d="M5.25 14.29c-.25-.72-.38-1.49-.38-2.29s.14-1.57.38-2.29V6.62H1.31C.47 8.24 0 10.06 0 12s.47 3.76 1.31 5.38l3.94-3.09z"/>
-              <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.37 0 3.26 2.7 1.31 6.62l3.94 3.09c.95-2.85 3.61-4.96 6.75-4.96z"/>
-            </svg>
-          </div>
-          
-          <div id="account-chooser" style="width: 100%; display: flex; flex-direction: column; align-items: center;">
-            <div class="title">Fazer login com o Google</div>
-            <div class="subtitle">para continuar no Meu Barão</div>
+    setLoading(true);
 
-            <div class="account-box">
-              <!-- Sergio Ferezin Account Option -->
-              <div class="account-item" onclick="selectAccount('SergioFerezin@gmail.com', 'Sergio Ferezin')">
-                <div class="avatar">S</div>
-                <div class="info">
-                  <span class="name">Sergio Ferezin</span>
-                  <span class="email">SergioFerezin@gmail.com (Desenvolvedora)</span>
-                </div>
-              </div>
-              
-              <!-- Alternative User Account option -->
-              <div class="account-item" id="custom-account-btn" onclick="showCustomSignInForm()">
-                <div class="avatar avatar-secondary">+</div>
-                <div class="info">
-                  <span class="name">Usar outro e-mail</span>
-                  <span class="email">Entrar com sua própria conta Google</span>
-                </div>
-              </div>
-            </div>
-            
-            <div class="footer">
-              Para continuar, o Google compartilhará seu nome, e-mail e foto do perfil com o app Meu Barão. Consulte a <a href="#">Política de Privacidade</a> deste ambiente confidencial.
-            </div>
-          </div>
+    try {
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: 'select_account' });
 
-          <div id="custom-signin-form" class="input-form">
-            <div class="title" style="margin-bottom: 4px;">Fazer login</div>
-            <div class="subtitle">Use sua Conta do Google ativa</div>
-            
-            <form onsubmit="handleCustomSubmit(event)" style="width: 100%;">
-              <div class="input-group">
-                <input type="email" id="custom-email" class="input-field" placeholder="E-mail do Google (ex: Helena@gmail.com)" required />
-              </div>
-              <div class="input-group">
-                <input type="text" id="custom-name" class="input-field" placeholder="Seu nome ou apelido como prefere ser chamada" />
-              </div>
-              <div class="button-row">
-                <button type="button" class="btn-text" onclick="showAccountChooser()">Voltar</button>
-                <button type="submit" class="btn-primary">Próximo</button>
-              </div>
-            </form>
-          </div>
-        </div>
+      const result = await signInWithPopup(auth, provider);
+      const fbUser = result.user;
 
-        <div id="loading-content" class="connecting">
-          <div class="spinner"></div>
-          <div class="name" style="margin-bottom: 4px; font-weight: 550; color: #ffffff;">Sintonizando ao Google...</div>
-          <div class="email" id="connecting-email" style="font-size: 13px; color: #94A3B8;"></div>
-        </div>
+      const matchedUser: User = {
+        id: fbUser.uid,
+        name: fbUser.displayName || fbUser.email?.split("@")[0] || "Visitante",
+        email: fbUser.email || "",
+        nickname: fbUser.displayName || fbUser.email?.split("@")[0] || "Visitante",
+        createdAt: fbUser.metadata.creationTime ? new Date(fbUser.metadata.creationTime).toISOString() : new Date().toISOString(),
+        plan: "premium",
+        tokens: 3000
+      };
 
-        <script>
-          function selectAccount(email, name) {
-            document.getElementById('main-content').style.display = 'none';
-            document.getElementById('loading-content').style.display = 'flex';
-            document.getElementById('connecting-email').innerText = email;
+      await syncUserProfile(matchedUser);
 
-            setTimeout(() => {
-              if (window.opener) {
-                window.opener.postMessage({
-                  type: 'GOOGLE_AUTH_SUCCESS',
-                  email: email,
-                  name: name
-                }, window.location.origin);
-                window.close();
-              } else {
-                alert('Erro de comunicação. O Barão não pôde receber seus dados.');
-              }
-            }, 1200);
-          }
+      setSuccessMsg(`Conectada via Google! Bem-vinda de volta, ${matchedUser.nickname || matchedUser.name}!`);
+      localStorage.setItem(SESSION_USER_KEY, JSON.stringify(matchedUser));
 
-          function showCustomSignInForm() {
-            document.getElementById('account-chooser').style.display = 'none';
-            document.getElementById('custom-signin-form').style.display = 'flex';
-            document.getElementById('custom-email').focus();
-          }
-
-          function showAccountChooser() {
-            document.getElementById('custom-signin-form').style.display = 'none';
-            document.getElementById('account-chooser').style.display = 'flex';
-          }
-
-          function handleCustomSubmit(e) {
-            e.preventDefault();
-            var email = document.getElementById('custom-email').value;
-            var name = document.getElementById('custom-name').value;
-            
-            if (!email || email.indexOf('@') === -1) {
-              alert("Por favor, digite um e-mail válido.");
-              return;
-            }
-            if (!name) {
-              name = email.split('@')[0];
-              name = name.charAt(0).toUpperCase() + name.slice(1);
-            }
-            selectAccount(email, name);
-          }
-        </script>
-      </body>
-      </html>
-    `;
-
-    popup.document.write(popupHtml);
-    popup.document.close();
+      setTimeout(() => {
+        onSuccess(matchedUser);
+      }, 1200);
+    } catch (fbErr: any) {
+      console.warn("[Firebase Google Auth Popup] Error:", fbErr.code, fbErr.message);
+      if (fbErr.code === "auth/popup-blocked") {
+        setError("O pop-up do Google foi bloqueado pelo seu navegador. Por favor, libere os pop-ups para este site e tente novamente.");
+      } else if (fbErr.code === "auth/cancelled-popup-request" || fbErr.code === "auth/popup-closed-by-user") {
+        // Usuário cancelou o pop-up: nenhuma mensagem de erro necessária.
+      } else if (fbErr.code === "auth/operation-not-allowed") {
+        setError("O provedor Google ainda não está ativo no console do seu Firebase. Acesse Firebase Console -> Authentication -> Sign-in method e ative o Google.");
+      } else {
+        setError(`Erro na sintonização Google: ${fbErr.message || fbErr}`);
+      }
+      setLoading(false);
+    }
   };
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
@@ -586,56 +113,41 @@ export default function BaraoAuth({ onSuccess, onClose, initialMode = "login", o
       return;
     }
 
+    if (!auth) {
+      setError("Autenticação indisponível no momento. Tente novamente mais tarde.");
+      setLoading(false);
+      return;
+    }
+
     try {
-      let matchedUser: User | undefined;
+      const userCredential = await signInWithEmailAndPassword(auth, email, password);
+      const fbUser = userCredential.user;
+      const matchedUser: User = {
+        id: fbUser.uid,
+        name: fbUser.displayName || email.split("@")[0],
+        email: fbUser.email || email,
+        nickname: fbUser.displayName || email.split("@")[0],
+        createdAt: fbUser.metadata.creationTime ? new Date(fbUser.metadata.creationTime).toISOString() : new Date().toISOString(),
+        plan: "premium",
+        tokens: 3000
+      };
 
-      // 1. Try Firebase Auth if initialized
-      if (auth) {
-        try {
-          const userCredential = await signInWithEmailAndPassword(auth, email, password);
-          const fbUser = userCredential.user;
-          matchedUser = {
-            id: fbUser.uid,
-            name: fbUser.displayName || email.split("@")[0],
-            email: fbUser.email || email,
-            nickname: fbUser.displayName || email.split("@")[0],
-            createdAt: fbUser.metadata.creationTime ? new Date(fbUser.metadata.creationTime).toISOString() : new Date().toISOString(),
-            plan: "premium",
-            tokens: 3000
-          };
-        } catch (fbErr: any) {
-          console.warn("[Firebase Auth Check] Local credentials fallback: ", fbErr.message);
-        }
-      }
+      await syncUserProfile(matchedUser);
 
-      // 2. Local fallback if no Firebase user logged in
-      if (!matchedUser) {
-        const users = getSavedUsers();
-        matchedUser = users.find(
-          (u) => u.email.toLowerCase() === email.toLowerCase() && u.password === password
-        );
-      }
-
-      if (matchedUser) {
-        // Sync profile config in Firestore
-        if (auth && auth.currentUser) {
-          const pKey = `mb_user_profile_${matchedUser.id}`;
-          const pStr = localStorage.getItem(pKey);
-          const localProfile = pStr ? JSON.parse(pStr) : null;
-          await syncUserProfile(matchedUser, localProfile);
-        }
-
-        setSuccessMsg(`Bem-vinda de volta, ${matchedUser.nickname || matchedUser.name}!`);
-        localStorage.setItem(SESSION_USER_KEY, JSON.stringify(matchedUser));
-        setTimeout(() => {
-          onSuccess(matchedUser!);
-        }, 1200);
-      } else {
-        setError("E-mail ou senha incorretos.");
-        setLoading(false);
-      }
+      setSuccessMsg(`Bem-vinda de volta, ${matchedUser.nickname || matchedUser.name}!`);
+      localStorage.setItem(SESSION_USER_KEY, JSON.stringify(matchedUser));
+      setTimeout(() => {
+        onSuccess(matchedUser);
+      }, 1200);
     } catch (err: any) {
-      setError(err instanceof Error ? err.message : String(err));
+      console.warn("[Firebase Auth Login]", err.code, err.message);
+      if (err.code === "auth/invalid-credential" || err.code === "auth/wrong-password" || err.code === "auth/user-not-found") {
+        setError("E-mail ou senha incorretos.");
+      } else if (err.code === "auth/too-many-requests") {
+        setError("Muitas tentativas seguidas. Aguarde um instante e tente novamente.");
+      } else {
+        setError(err instanceof Error ? err.message : String(err));
+      }
       setLoading(false);
     }
   };
@@ -663,34 +175,20 @@ export default function BaraoAuth({ onSuccess, onClose, initialMode = "login", o
       return;
     }
 
+    if (!auth) {
+      setError("Autenticação indisponível no momento. Tente novamente mais tarde.");
+      setLoading(false);
+      return;
+    }
+
     try {
-      const users = getSavedUsers();
-      const existingUser = users.find((u) => u.email.toLowerCase() === email.toLowerCase());
-
-      if (existingUser) {
-        setError("Este e-mail já está sintonizado com O Barão. Tente fazer login.");
-        setLoading(false);
-        return;
-      }
-
-      let assignedId = "usr-" + Math.random().toString(36).substr(2, 9);
-
-      // Register via Firebase Auth if active
-      if (auth) {
-        try {
-          const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-          await updateProfile(userCredential.user, { displayName: nickname || name });
-          assignedId = userCredential.user.uid;
-        } catch (fbErr: any) {
-          console.warn("[Firebase Create Auth Fail] Falling back to local simulation...", fbErr);
-        }
-      }
+      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+      await updateProfile(userCredential.user, { displayName: nickname || name });
 
       const newUser: User = {
-        id: assignedId,
+        id: userCredential.user.uid,
         name,
         email,
-        password,
         nickname,
         preferredSound,
         createdAt: new Date().toISOString(),
@@ -698,25 +196,28 @@ export default function BaraoAuth({ onSuccess, onClose, initialMode = "login", o
         tokens: selectedPlan === 'free' ? 100 : selectedPlan === 'premium' ? 2500 : 9999999
       };
 
-      saveUserToLocalStorage(newUser);
-
-      // Sync profile details to cloud db
-      if (auth && auth.currentUser) {
-        const profileDetails = {
-          nickname: nickname,
-          biography: `Sintonizada como ${name} com preferências em som ${preferredSound}`
-        };
-        await syncUserProfile(newUser, profileDetails);
-      }
+      await syncUserProfile(newUser, {
+        nickname,
+        biography: `Sintonizada como ${name} com preferências em som ${preferredSound}`
+      });
 
       setSuccessMsg("Seu abrigo íntimo foi criado. Sintonizando presença com a nuvem...");
       localStorage.setItem(SESSION_USER_KEY, JSON.stringify(newUser));
-      
+
       setTimeout(() => {
         onSuccess(newUser);
       }, 1500);
     } catch (err: any) {
-      setError(err instanceof Error ? err.message : String(err));
+      console.warn("[Firebase Auth Register]", err.code, err.message);
+      if (err.code === "auth/email-already-in-use") {
+        setError("Este e-mail já está sintonizado com O Barão. Tente fazer login.");
+      } else if (err.code === "auth/weak-password") {
+        setError("Sua chave de acesso precisa ter pelo menos 6 caracteres.");
+      } else if (err.code === "auth/invalid-email") {
+        setError("Por favor, insira um e-mail válido.");
+      } else {
+        setError(err instanceof Error ? err.message : String(err));
+      }
       setLoading(false);
     }
   };

@@ -3,14 +3,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { 
-  collection, 
-  doc, 
-  setDoc, 
-  getDoc, 
-  getDocs, 
-  query, 
-  limit, 
+import {
+  collection,
+  collectionGroup,
+  doc,
+  setDoc,
+  getDoc,
+  getDocs,
+  query,
+  where,
+  orderBy,
+  limit,
   writeBatch
 } from "firebase/firestore";
 import { db, auth } from "../lib/firebase";
@@ -78,9 +81,9 @@ export function isFirebaseSyncReady(): boolean {
  * Automatically pushes the user's core profile and preferences to Firestore
  * to synchronize with the security rules model.
  */
-export async function syncUserProfile(user: User, localProfileDetails?: any) {
+export async function syncUserProfile(user: User, fullProfileData?: any) {
   if (!isFirebaseSyncReady()) return;
-  
+
   const userId = auth.currentUser!.uid;
   const pathUser = `users/${userId}`;
   const pathPrefs = `userPreferences/${userId}`;
@@ -97,13 +100,18 @@ export async function syncUserProfile(user: User, localProfileDetails?: any) {
     };
     await setDoc(doc(db, "users", userId), userDocData);
 
-    // 2. Write preferences document
+    // 2. Write preferences document. fullProfileData (the entire "Meu Universo" profile
+    // object) is persisted verbatim so Firestore is the single source of truth for it.
+    // The fixed fields below are applied AFTER the spread so they always satisfy the
+    // security rules, regardless of what fullProfileData contains. avatar_model_style
+    // stays a short fixed placeholder (rules cap it at 50 chars) — the real avatar/photo
+    // (which can be a large base64 data URI) lives in the unrestricted `avatarUrl` field.
     const prefData = {
+      ...(fullProfileData || {}),
       idioma_preferido: "pt-BR",
       timezone: "America/Sao_Paulo",
-      preferred_voice_id: user.preferredSound || "chuva",
-      avatar_model_style: localProfileDetails?.avatarUrl || "classico",
-      fatos_biografia: localProfileDetails?.biography || "",
+      preferred_voice_id: user.preferredSound || fullProfileData?.preferredSound || "chuva",
+      avatar_model_style: "custom",
       genero_afetor: "feminino",
       updatedAt: new Date().toISOString()
     };
@@ -112,6 +120,62 @@ export async function syncUserProfile(user: User, localProfileDetails?: any) {
     console.log("[FirebaseSync] Core user profiles sintonizados com sucesso!");
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, pathUser);
+  }
+}
+
+/**
+ * Reads the user's full profile (core user doc + preferences/"Meu Universo" doc) back
+ * from Firestore. Returns null if neither document exists yet.
+ */
+export async function getUserProfile(userId: string): Promise<Record<string, any> | null> {
+  if (!db) return null;
+  const path = `userPreferences/${userId}`;
+  try {
+    const [userSnap, prefsSnap] = await Promise.all([
+      getDoc(doc(db, "users", userId)),
+      getDoc(doc(db, "userPreferences", userId))
+    ]);
+
+    if (!userSnap.exists() && !prefsSnap.exists()) return null;
+
+    const prefsData = prefsSnap.exists() ? prefsSnap.data() : {};
+    const userData = userSnap.exists() ? userSnap.data() : {};
+
+    return {
+      ...prefsData,
+      name: prefsData.name || userData.nome_completo,
+    };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, path);
+    return null;
+  }
+}
+
+/**
+ * Reads all diary entries for a user directly from Firestore (no local merge).
+ */
+export async function getDiaryEntries(userId: string): Promise<DiaryEntry[]> {
+  if (!db) return [];
+  const path = `users/${userId}/diaryEntries`;
+  try {
+    const snapshot = await getDocs(collection(db, "users", userId, "diaryEntries"));
+    const entries: DiaryEntry[] = [];
+    snapshot.forEach(docSnap => {
+      const data = docSnap.data();
+      entries.push({
+        id: docSnap.id,
+        date: data.date,
+        content: data.content,
+        status: data.status || "generated",
+        intensity: data.intensity || 3,
+        createdAt: data.createdAt || new Date().toISOString(),
+        summary: data.summary || []
+      });
+    });
+    return entries.sort((a, b) => b.id.localeCompare(a.id));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
   }
 }
 
@@ -192,6 +256,34 @@ export async function syncDiaryEntries(userId: string, localEntries: DiaryEntry[
 }
 
 /**
+ * Reads all history/memory entries for a user directly from Firestore (no local merge).
+ */
+export async function getHistoryEntries(userId: string): Promise<HistoryEntry[]> {
+  if (!db) return [];
+  const path = `users/${userId}/lifeEvents`;
+  try {
+    const snapshot = await getDocs(collection(db, "users", userId, "lifeEvents"));
+    const entries: HistoryEntry[] = [];
+    snapshot.forEach(docSnap => {
+      const data = docSnap.data();
+      entries.push({
+        id: docSnap.id,
+        title: data.title || "Crônica",
+        description: data.description || "",
+        story: data.story || "",
+        imageUrl: data.imageUrl || "",
+        type: data.type || "generated",
+        createdAt: data.createdAt || new Date().toISOString()
+      });
+    });
+    return entries.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
+  }
+}
+
+/**
  * Syncs memory and life history entries into Firestore as lifeEvents.
  */
 export async function syncHistoryEntries(userId: string, localHistories: HistoryEntry[]): Promise<HistoryEntry[]> {
@@ -261,6 +353,69 @@ export async function syncHistoryEntries(userId: string, localHistories: History
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, path);
     return localHistories;
+  }
+}
+
+/**
+ * Reads every message from a single conversation thread, ordered chronologically.
+ */
+export async function getConversationMessages(threadId: string): Promise<Message[]> {
+  if (!db) return [];
+  const path = `conversations/${threadId}/messages`;
+  try {
+    const snapshot = await getDocs(collection(db, "conversations", threadId, "messages"));
+    const rows: { id: string; data: any }[] = [];
+    snapshot.forEach(docSnap => rows.push({ id: docSnap.id, data: docSnap.data() }));
+    rows.sort((a, b) => String(a.data.createdAt || "").localeCompare(String(b.data.createdAt || "")));
+
+    return rows.map(({ id, data }) => ({
+      id: id === "welcome_msg" ? "welcome" : id,
+      role: data.role === "usuario" ? "user" : "model",
+      text: data.content || "",
+      timestamp: data.createdAt
+        ? new Date(data.createdAt).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })
+        : "",
+      date: data.createdAt ? String(data.createdAt).substring(0, 10) : undefined
+    }));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
+  }
+}
+
+/**
+ * Reads every message the user has ever sent/received, across all conversation threads,
+ * ordered chronologically. Used by the Diary feature to cluster dialogue by day.
+ * Requires a Firestore composite index on the "messages" collection group:
+ * (userId ASC, createdAt ASC).
+ */
+export async function getAllUserMessagesByDate(userId: string): Promise<Message[]> {
+  if (!db) return [];
+  const path = `collectionGroup(messages) where userId == ${userId}`;
+  try {
+    const q = query(
+      collectionGroup(db, "messages"),
+      where("userId", "==", userId),
+      orderBy("createdAt", "asc")
+    );
+    const snapshot = await getDocs(q);
+    const messages: Message[] = [];
+    snapshot.forEach(docSnap => {
+      const data = docSnap.data();
+      messages.push({
+        id: docSnap.id,
+        role: data.role === "usuario" ? "user" : "model",
+        text: data.content || "",
+        timestamp: data.createdAt
+          ? new Date(data.createdAt).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })
+          : "",
+        date: data.createdAt ? String(data.createdAt).substring(0, 10) : undefined
+      });
+    });
+    return messages;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
   }
 }
 

@@ -8,9 +8,7 @@ import {
 import { User } from "../types";
 import { renderAvatarSvgOrImg } from "../utils/avatar";
 import BaraoPaywall from "./BaraoPaywall";
-import { syncUserProfile } from "../utils/firebaseSync";
-
-const SESSION_USER_KEY = "mb_logged_user";
+import { syncUserProfile, getUserProfile } from "../utils/firebaseSync";
 
 // Define the schema for the profile data
 export interface UserProfileData {
@@ -107,22 +105,10 @@ export default function UserProfilePanel({ currentUser, onTabChange, onUserUpdat
     );
   }
 
-  const profileStorageKey = currentUser ? `mb_user_profile_${currentUser.id}` : "mb_user_profile_guest";
-  const weightStorageKey = currentUser ? `mb_profile_weight_${currentUser.id}` : "mb_profile_weight_guest";
-
-  // Initial load
-  const [profile, setProfile] = useState<UserProfileData>(() => {
-    const saved = localStorage.getItem(profileStorageKey);
-    if (saved) {
-      try { return JSON.parse(saved); } catch (e) { return {}; }
-    }
-    return {};
-  });
-
-  const [profileWeight, setProfileWeight] = useState<"sutil" | "equilibrado" | "intenso">(() => {
-    const saved = localStorage.getItem(weightStorageKey);
-    return (saved as "sutil" | "equilibrado" | "intenso") || "equilibrado";
-  });
+  // Perfil vive só no Firestore agora (users/{id} + userPreferences/{id}).
+  const [profile, setProfile] = useState<UserProfileData>({});
+  const [profileWeight, setProfileWeight] = useState<"sutil" | "equilibrado" | "intenso">("equilibrado");
+  const [isLoadingProfile, setIsLoadingProfile] = useState(true);
 
   const [activeStep, setActiveStep] = useState<number>(0);
   const [saveSuccess, setSaveSuccess] = useState(false);
@@ -137,31 +123,35 @@ export default function UserProfilePanel({ currentUser, onTabChange, onUserUpdat
   const [newBookText, setNewBookText] = useState("");
   const [newWishlistPlaceText, setNewWishlistPlaceText] = useState("");
 
-  // Sync profile options
+  // Load profile from Firestore
   useEffect(() => {
-    const saved = localStorage.getItem(profileStorageKey);
-    if (saved) {
-      try { setProfile(JSON.parse(saved)); } catch (e) { }
-    } else {
-      setProfile({});
-    }
-  }, [profileStorageKey]);
+    let cancelled = false;
+    setIsLoadingProfile(true);
+    getUserProfile(currentUser.id).then(data => {
+      if (cancelled) return;
+      setProfile(data || {});
+      setProfileWeight((data?.profileWeight as "sutil" | "equilibrado" | "intenso") || "equilibrado");
+      setIsLoadingProfile(false);
+    }).catch(err => {
+      console.warn("[FirebaseSync User] Warning loading profile: ", err);
+      if (!cancelled) setIsLoadingProfile(false);
+    });
+    return () => { cancelled = true; };
+  }, [currentUser.id]);
 
   // Save changes helper
   const saveProfile = (newProfile: UserProfileData) => {
     setProfile(newProfile);
-    localStorage.setItem(profileStorageKey, JSON.stringify(newProfile));
-    
-    // If logged in, update currentUser's local copy just in case
-    if (currentUser && newProfile.nickname) {
-      const updatedUser = { ...currentUser, nickname: newProfile.nickname };
-      localStorage.setItem(SESSION_USER_KEY, JSON.stringify(updatedUser));
-      
-      // Sync to Firestore in background
-      syncUserProfile(updatedUser, newProfile).catch(err => {
-        console.warn("[FirebaseSync User] Warning syncing preferences: ", err);
-      });
+
+    const updatedUser = newProfile.nickname ? { ...currentUser, nickname: newProfile.nickname } : currentUser;
+    if (newProfile.nickname) {
+      onUserUpdate?.(updatedUser);
     }
+
+    // Sync to Firestore in background
+    syncUserProfile(updatedUser, newProfile).catch(err => {
+      console.warn("[FirebaseSync User] Warning syncing preferences: ", err);
+    });
 
     setSaveSuccess(true);
     setTimeout(() => setSaveSuccess(false), 2000);
@@ -169,7 +159,9 @@ export default function UserProfilePanel({ currentUser, onTabChange, onUserUpdat
 
   const saveProfileWeight = (weight: "sutil" | "equilibrado" | "intenso") => {
     setProfileWeight(weight);
-    localStorage.setItem(weightStorageKey, weight);
+    syncUserProfile(currentUser, { ...profile, profileWeight: weight }).catch(err => {
+      console.warn("[FirebaseSync User] Warning syncing profile weight: ", err);
+    });
   };
 
   // List of all 10 stages / steps
@@ -2105,9 +2097,17 @@ export default function UserProfilePanel({ currentUser, onTabChange, onUserUpdat
     );
   };
 
+  if (isLoadingProfile) {
+    return (
+      <div className="max-w-4xl mx-auto py-16 flex items-center justify-center text-zinc-500 text-xs font-mono uppercase tracking-widest animate-pulse">
+        Sintonizando seu Universo...
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-4xl mx-auto space-y-8 animate-fade-in text-left">
-      
+
       {/* Constellation Dashboard Header */}
       <div className="bg-[#0b0a0a] border border-white/5 rounded-sm p-6 sm:p-8 relative overflow-hidden flex flex-col md:flex-row md:items-center justify-between gap-6">
         <div className="absolute inset-0 pointer-events-none overflow-hidden opacity-30">
