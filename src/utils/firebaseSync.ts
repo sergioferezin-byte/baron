@@ -89,7 +89,8 @@ export async function syncUserProfile(user: User, fullProfileData?: any) {
   const pathPrefs = `userPreferences/${userId}`;
 
   try {
-    // 1. Write core user document
+    // Write the core user document and the preferences document concurrently — they're
+    // independent documents, so there's no need to wait for one before starting the other.
     const userDocData = {
       email: user.email,
       nome_completo: user.name,
@@ -98,14 +99,13 @@ export async function syncUserProfile(user: User, fullProfileData?: any) {
       createdAt: new Date(user.createdAt || Date.now()).toISOString(),
       updatedAt: new Date().toISOString()
     };
-    await setDoc(doc(db, "users", userId), userDocData);
 
-    // 2. Write preferences document. fullProfileData (the entire "Meu Universo" profile
-    // object) is persisted verbatim so Firestore is the single source of truth for it.
-    // The fixed fields below are applied AFTER the spread so they always satisfy the
-    // security rules, regardless of what fullProfileData contains. avatar_model_style
-    // stays a short fixed placeholder (rules cap it at 50 chars) — the real avatar/photo
-    // (which can be a large base64 data URI) lives in the unrestricted `avatarUrl` field.
+    // fullProfileData (the entire "Meu Universo" profile object) is persisted verbatim so
+    // Firestore is the single source of truth for it. The fixed fields below are applied
+    // AFTER the spread so they always satisfy the security rules, regardless of what
+    // fullProfileData contains. avatar_model_style stays a short fixed placeholder (rules
+    // cap it at 50 chars) — the real avatar/photo (which can be a large base64 data URI)
+    // lives in the unrestricted `avatarUrl` field.
     const prefData = {
       ...(fullProfileData || {}),
       idioma_preferido: "pt-BR",
@@ -115,7 +115,11 @@ export async function syncUserProfile(user: User, fullProfileData?: any) {
       genero_afetor: "feminino",
       updatedAt: new Date().toISOString()
     };
-    await setDoc(doc(db, "userPreferences", userId), prefData);
+
+    await Promise.all([
+      setDoc(doc(db, "users", userId), userDocData),
+      setDoc(doc(db, "userPreferences", userId), prefData)
+    ]);
 
     console.log("[FirebaseSync] Core user profiles sintonizados com sucesso!");
   } catch (error) {
