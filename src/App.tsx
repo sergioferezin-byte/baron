@@ -23,7 +23,7 @@ import MeuBarao from "./components/MeuBarao"; // Import customized Baron managem
 import BaraoAdminDashboard from "./components/BaraoAdminDashboard"; // Import modular admin control panel
 import baraoBackground from "./assets/images/barao_portrait_1779931788412.png";
 import { auth } from "./lib/firebase";
-import { onAuthStateChanged, signInWithEmailAndPassword, signOut, getRedirectResult } from "firebase/auth";
+import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { syncUserProfile } from "./utils/firebaseSync";
 
 type ActiveTab = "home" | "dialogo" | "refugio" | "universo" | "evolucao" | "meubarao" | "privacy" | "terms" | "admin";
@@ -117,34 +117,14 @@ export default function App() {
     }
   }, [currentUser, activeTab]);
 
-  // Completes a mobile Google sign-in started via signInWithRedirect (see BaraoAuth.tsx):
-  // the page navigated away to Google and back, so this picks up the result on return and
-  // creates the Firestore profile docs — onAuthStateChanged below never calls syncUserProfile.
-  useEffect(() => {
-    if (!auth) return;
-
-    getRedirectResult(auth).then(async (result) => {
-      if (!result || !result.user) return;
-      const fbUser = result.user;
-      const matchedUser: User = {
-        id: fbUser.uid,
-        name: fbUser.displayName || fbUser.email?.split("@")[0] || "Visitante",
-        email: fbUser.email || "",
-        nickname: fbUser.displayName || fbUser.email?.split("@")[0] || "Visitante",
-        createdAt: fbUser.metadata.creationTime ? new Date(fbUser.metadata.creationTime).toISOString() : new Date().toISOString(),
-        plan: "premium",
-        tokens: 3000
-      };
-      await syncUserProfile(matchedUser);
-      setCurrentUser(matchedUser);
-      localStorage.setItem(SESSION_USER_KEY, JSON.stringify(matchedUser));
-      setShowAuthModal(false);
-    }).catch(err => {
-      console.warn("[Firebase Auth Redirect] Erro ao concluir login por redirect:", err);
-    });
-  }, []);
-
-  // Synchronize local session user with Firebase Authentication
+  // Synchronize local session user with Firebase Authentication. This is the single
+  // source of truth for detecting a signed-in session, regardless of how it was
+  // established (email/password, Google popup, Google redirect, or a session restored
+  // from a previous visit) — getRedirectResult() alone is NOT reliable enough on its own:
+  // on Safari/iOS in particular, cross-domain storage restrictions can lose the pending
+  // redirect state, so the Firebase Auth user gets created server-side but the client
+  // never receives the result. onAuthStateChanged still fires in that case, so
+  // syncUserProfile is called from here to guarantee the Firestore profile docs exist.
   useEffect(() => {
     if (!auth) return;
 
@@ -164,6 +144,10 @@ export default function App() {
           };
           setCurrentUser(matchedUser);
           localStorage.setItem(SESSION_USER_KEY, JSON.stringify(matchedUser));
+          setShowAuthModal(false);
+          syncUserProfile(matchedUser).catch(err => {
+            console.warn("[Firebase Auth State] Erro ao sincronizar perfil no Firestore:", err);
+          });
         }
       } else {
         console.log("[Firebase Auth State] Desconectado.");
