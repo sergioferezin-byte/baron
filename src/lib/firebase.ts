@@ -33,7 +33,12 @@ if (hasApiKey) {
       app = getApp();
     }
     auth = getAuth(app);
-    db = getFirestore(app);
+    // This project's Cloud Firestore instance is a named database (auto-provisioned by AI
+    // Studio), not the "(default)" one getFirestore(app) connects to by convention — so the
+    // database id must be passed explicitly, or every Firestore call fails with
+    // "Database '(default)' not found."
+    const firestoreDatabaseId = import.meta.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID;
+    db = firestoreDatabaseId ? getFirestore(app, firestoreDatabaseId) : getFirestore(app);
   } catch (error) {
     console.error("Erro durante a inicialização do Firebase Client:", error);
   }
