@@ -80,11 +80,18 @@ export function isFirebaseSyncReady(): boolean {
 /**
  * Automatically pushes the user's core profile and preferences to Firestore
  * to synchronize with the security rules model.
+ *
+ * Uses user.id (already known by every caller) instead of re-reading
+ * auth.currentUser.uid: right after a redirect-based sign-in completes (mobile Google
+ * login), onAuthStateChanged can invoke its callback with a populated fbUser slightly
+ * before auth.currentUser is synchronously set on the SDK's side. Gating on
+ * isFirebaseSyncReady() (which required auth.currentUser) made this a silent no-op in
+ * that window — no error, no write, nothing in the console.
  */
 export async function syncUserProfile(user: User, fullProfileData?: any) {
-  if (!isFirebaseSyncReady()) return;
+  if (!db) return;
 
-  const userId = auth.currentUser!.uid;
+  const userId = user.id;
   const pathUser = `users/${userId}`;
   const pathPrefs = `userPreferences/${userId}`;
 
