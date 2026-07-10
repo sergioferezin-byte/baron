@@ -7,7 +7,7 @@ import React, { useState } from "react";
 import { User } from "../types";
 import { Eye, EyeOff, Key, Mail, User as UserIcon, Sparkles, AlertCircle, Heart, Check } from "lucide-react";
 import { auth } from "../lib/firebase";
-import { signInWithEmailAndPassword, createUserWithEmailAndPassword, updateProfile, signInWithPopup, GoogleAuthProvider } from "firebase/auth";
+import { signInWithEmailAndPassword, createUserWithEmailAndPassword, updateProfile, signInWithPopup, signInWithRedirect, GoogleAuthProvider } from "firebase/auth";
 import { syncUserProfile } from "../utils/firebaseSync";
 
 // Cache de sessão apenas — nunca fonte de dados. A fonte real é Firebase Auth + Firestore
@@ -40,8 +40,8 @@ export default function BaraoAuth({ onSuccess, onClose, initialMode = "login", o
   const [loading, setLoading] = useState(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
-  // Autenticação Google real via Firebase Auth (signInWithPopup). Sem fallback simulado:
-  // se o Firebase Auth não conseguir autenticar de verdade, mostramos erro ao usuário.
+  // Autenticação Google real via Firebase Auth. Sem fallback simulado: se o Firebase Auth
+  // não conseguir autenticar de verdade, mostramos erro ao usuário.
   const triggerGoogleAuth = async () => {
     setError(null);
     if (!acceptedTermsPrivacy) {
@@ -56,10 +56,26 @@ export default function BaraoAuth({ onSuccess, onClose, initialMode = "login", o
 
     setLoading(true);
 
-    try {
-      const provider = new GoogleAuthProvider();
-      provider.setCustomParameters({ prompt: 'select_account' });
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
 
+    // signInWithPopup is unreliable on mobile browsers (blocked, silently ignored, or the
+    // popup just never resolves). Firebase's own guidance is to use a redirect there
+    // instead: the page navigates to Google and back, and App.tsx's getRedirectResult
+    // effect picks up the completed sign-in when the app reloads.
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    if (isMobile) {
+      try {
+        await signInWithRedirect(auth, provider);
+      } catch (fbErr: any) {
+        console.warn("[Firebase Google Auth Redirect] Error:", fbErr.code, fbErr.message);
+        setError(`Erro na sintonização Google: ${fbErr.message || fbErr}`);
+        setLoading(false);
+      }
+      return;
+    }
+
+    try {
       const result = await signInWithPopup(auth, provider);
       const fbUser = result.user;
 

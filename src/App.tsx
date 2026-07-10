@@ -23,7 +23,8 @@ import MeuBarao from "./components/MeuBarao"; // Import customized Baron managem
 import BaraoAdminDashboard from "./components/BaraoAdminDashboard"; // Import modular admin control panel
 import baraoBackground from "./assets/images/barao_portrait_1779931788412.png";
 import { auth } from "./lib/firebase";
-import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
+import { onAuthStateChanged, signInWithEmailAndPassword, signOut, getRedirectResult } from "firebase/auth";
+import { syncUserProfile } from "./utils/firebaseSync";
 
 type ActiveTab = "home" | "dialogo" | "refugio" | "universo" | "evolucao" | "meubarao" | "privacy" | "terms" | "admin";
 
@@ -116,10 +117,37 @@ export default function App() {
     }
   }, [currentUser, activeTab]);
 
+  // Completes a mobile Google sign-in started via signInWithRedirect (see BaraoAuth.tsx):
+  // the page navigated away to Google and back, so this picks up the result on return and
+  // creates the Firestore profile docs — onAuthStateChanged below never calls syncUserProfile.
+  useEffect(() => {
+    if (!auth) return;
+
+    getRedirectResult(auth).then(async (result) => {
+      if (!result || !result.user) return;
+      const fbUser = result.user;
+      const matchedUser: User = {
+        id: fbUser.uid,
+        name: fbUser.displayName || fbUser.email?.split("@")[0] || "Visitante",
+        email: fbUser.email || "",
+        nickname: fbUser.displayName || fbUser.email?.split("@")[0] || "Visitante",
+        createdAt: fbUser.metadata.creationTime ? new Date(fbUser.metadata.creationTime).toISOString() : new Date().toISOString(),
+        plan: "premium",
+        tokens: 3000
+      };
+      await syncUserProfile(matchedUser);
+      setCurrentUser(matchedUser);
+      localStorage.setItem(SESSION_USER_KEY, JSON.stringify(matchedUser));
+      setShowAuthModal(false);
+    }).catch(err => {
+      console.warn("[Firebase Auth Redirect] Erro ao concluir login por redirect:", err);
+    });
+  }, []);
+
   // Synchronize local session user with Firebase Authentication
   useEffect(() => {
     if (!auth) return;
-    
+
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       if (fbUser) {
         console.log("[Firebase Auth State] Sintonizado conectado:", fbUser.uid, fbUser.email);
