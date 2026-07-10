@@ -9,6 +9,7 @@ export interface Message {
   text: string;
   timestamp: string;
   isVoice?: boolean;
+  audioUrl?: string;
   date?: string; // ISO date format YYYY-MM-DD for daily clustering
   attachments?: {
     name: string;

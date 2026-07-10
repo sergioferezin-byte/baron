@@ -23,7 +23,7 @@ interface PremiumMobileMenuProps {
   activeTab: ActiveTab;
   setActiveTab: (tab: ActiveTab) => void;
   currentUser: User | null;
-  onLogout: () => void;
+  setCurrentUser: (user: User | null) => void;
   onSintonizar: () => void;
   userAvatar?: string;
   renderAvatarSvgOrImg: (avatarUrl: string | undefined, letter: string, className: string) => React.ReactNode;
@@ -33,7 +33,7 @@ export default function PremiumMobileMenu({
   activeTab,
   setActiveTab,
   currentUser,
-  onLogout,
+  setCurrentUser,
   onSintonizar,
   userAvatar,
   renderAvatarSvgOrImg
@@ -236,7 +236,8 @@ export default function PremiumMobileMenu({
                     
                     <button
                       onClick={() => {
-                        onLogout();
+                        setCurrentUser(null);
+                        localStorage.removeItem("mb_logged_user");
                         setIsOpen(false);
                       }}
                       className="px-2.5 py-1.5 border border-white/10 hover:border-rose-950 hover:bg-rose-950/15 hover:text-red-300 transition-all text-[8px] uppercase font-mono tracking-wider rounded-sm text-zinc-300 bg-black/40 flex items-center gap-1 cursor-pointer active:scale-95"

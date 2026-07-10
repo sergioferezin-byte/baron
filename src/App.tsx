@@ -22,9 +22,7 @@ import BaraoLogo from "./components/BaraoLogo";
 import MeuBarao from "./components/MeuBarao"; // Import customized Baron management view
 import BaraoAdminDashboard from "./components/BaraoAdminDashboard"; // Import modular admin control panel
 import baraoBackground from "./assets/images/barao_portrait_1779931788412.png";
-import { auth } from "./lib/firebase";
-import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
-import { syncUserProfile } from "./utils/firebaseSync";
+import { supabase } from "./lib/supabase";
 
 type ActiveTab = "home" | "dialogo" | "refugio" | "universo" | "evolucao" | "meubarao" | "privacy" | "terms" | "admin";
 
@@ -117,53 +115,45 @@ export default function App() {
     }
   }, [currentUser, activeTab]);
 
-  // Synchronize local session user with Firebase Authentication. This is the single
-  // source of truth for detecting a signed-in session, regardless of how it was
-  // established (email/password, Google popup, Google redirect, or a session restored
-  // from a previous visit) — getRedirectResult() alone is NOT reliable enough on its own:
-  // on Safari/iOS in particular, cross-domain storage restrictions can lose the pending
-  // redirect state, so the Firebase Auth user gets created server-side but the client
-  // never receives the result. onAuthStateChanged still fires in that case, so
-  // syncUserProfile is called from here to guarantee the Firestore profile docs exist.
+  // Synchronize local session user with Supabase Authentication
   useEffect(() => {
-    if (!auth) return;
-
-    const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
-      if (fbUser) {
-        console.log("[Firebase Auth State] Sintonizado conectado:", fbUser.uid, fbUser.email);
-        // If we are signed in on Firebase but currentUser doesn't match ID, sync
-        if (!currentUser || currentUser.id !== fbUser.uid) {
+    if (!supabase) return;
+    
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      const sbUser = session?.user;
+      if (sbUser) {
+        console.log("[Supabase Auth State] Sintonizado conectado:", sbUser.id, sbUser.email);
+        if (!currentUser || currentUser.id !== sbUser.id) {
           const matchedUser: User = {
-            id: fbUser.uid,
-            name: fbUser.displayName || fbUser.email?.split("@")[0] || "Visitante",
-            email: fbUser.email || "",
-            nickname: fbUser.displayName || fbUser.email?.split("@")[0] || "Visitante",
-            createdAt: fbUser.metadata.creationTime ? new Date(fbUser.metadata.creationTime).toISOString() : new Date().toISOString(),
+            id: sbUser.id,
+            name: sbUser.user_metadata?.name || sbUser.email?.split("@")[0] || "Visitante",
+            email: sbUser.email || "",
+            nickname: sbUser.user_metadata?.nickname || sbUser.email?.split("@")[0] || "Visitante",
+            createdAt: sbUser.created_at || new Date().toISOString(),
             plan: "premium",
             tokens: 3000
           };
           setCurrentUser(matchedUser);
           localStorage.setItem(SESSION_USER_KEY, JSON.stringify(matchedUser));
-          setShowAuthModal(false);
-          syncUserProfile(matchedUser).catch(err => {
-            console.warn("[Firebase Auth State] Erro ao sincronizar perfil no Firestore:", err);
-          });
         }
       } else {
-        console.log("[Firebase Auth State] Desconectado.");
-        // If there is a stored local user with email & password, log back in silently to reactivate Firebase status
+        console.log("[Supabase Auth State] Desconectado.");
+        // If there is a stored local user with email & password, log back in silently
         if (currentUser && currentUser.email && currentUser.password && currentUser.password !== "google_oauth_provider") {
           try {
-            console.log("[Firebase Auth State] Reconectando usuário local de forma silenciosa para sincronismo...");
-            await signInWithEmailAndPassword(auth, currentUser.email, currentUser.password);
+            console.log("[Supabase Auth State] Reconectando usuário local de forma silenciosa para sincronismo...");
+            await supabase.auth.signInWithPassword({
+              email: currentUser.email,
+              password: currentUser.password
+            });
           } catch (syncErr) {
-            console.warn("[Firebase Sync Sign-In Fallback Error]:", syncErr);
+            console.log("[Supabase Sync Sign-In Info] Silently managed credentials pending setup:", syncErr);
           }
         }
       }
     });
     
-    return () => unsubscribe();
+    return () => subscription.unsubscribe();
   }, [currentUser]);
 
   const handleUserUpdate = (updatedUser: User | null) => {
@@ -184,15 +174,6 @@ export default function App() {
     } else {
       localStorage.removeItem(SESSION_USER_KEY);
     }
-  };
-
-  // Ends the real Firebase session first — otherwise onAuthStateChanged still sees a
-  // signed-in user and immediately logs them back in right after handleUserUpdate(null).
-  const handleLogout = () => {
-    if (auth) {
-      signOut(auth).catch(err => console.warn("[Firebase Auth] Erro ao sair:", err));
-    }
-    handleUserUpdate(null);
   };
 
   return (
@@ -319,7 +300,10 @@ export default function App() {
                   {renderAvatarSvgOrImg(userAvatar, (currentUser.nickname || currentUser.name || "U").slice(0, 1), "w-8 h-8 rounded-sm")}
                 </div>
                 <button
-                  onClick={handleLogout}
+                  onClick={() => {
+                    localStorage.removeItem(SESSION_USER_KEY);
+                    setCurrentUser(null);
+                  }}
                   className="px-2.5 py-1.5 border border-white/10 hover:border-rose-950 hover:text-red-300 transition-all duration-300 text-[9px] uppercase font-mono tracking-wider rounded-sm text-zinc-400 bg-black flex items-center gap-1.5"
                   title="Sair do Abrigo"
                 >
@@ -346,7 +330,7 @@ export default function App() {
             activeTab={activeTab}
             setActiveTab={setActiveTab}
             currentUser={currentUser}
-            onLogout={handleLogout}
+            setCurrentUser={setCurrentUser}
             onSintonizar={() => {
               setAuthInitialMode("login");
               setShowAuthModal(true);

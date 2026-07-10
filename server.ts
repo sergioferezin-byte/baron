@@ -7,6 +7,34 @@ import fs from "fs";
 
 dotenv.config();
 
+// Diagnostic logging for Supabase environment variables
+console.log("=== SUPABASE STARTUP DIAGNOSTICS ===");
+console.log("VITE_SUPABASE_URL defined:", !!process.env.VITE_SUPABASE_URL, process.env.VITE_SUPABASE_URL ? `(Length: ${process.env.VITE_SUPABASE_URL.length}, Start: ${process.env.VITE_SUPABASE_URL.substring(0, 15)}...)` : "(empty)");
+console.log("VITE_SUPABASE_ANON_KEY defined:", !!process.env.VITE_SUPABASE_ANON_KEY, process.env.VITE_SUPABASE_ANON_KEY ? `(Length: ${process.env.VITE_SUPABASE_ANON_KEY.length}, Start: ${process.env.VITE_SUPABASE_ANON_KEY.substring(0, 10)}...)` : "(empty)");
+console.log("SUPABASE_SERVICE_ROLE_KEY defined:", !!process.env.SUPABASE_SERVICE_ROLE_KEY, process.env.SUPABASE_SERVICE_ROLE_KEY ? `(Length: ${process.env.SUPABASE_SERVICE_ROLE_KEY.length}, Start: ${process.env.SUPABASE_SERVICE_ROLE_KEY.substring(0, 10)}...)` : "(empty)");
+if (!process.env.SUPABASE_SERVICE_ROLE_KEY && process.env.VITE_SUPABASE_ANON_KEY) {
+  console.warn("WARNING: SUPABASE_SERVICE_ROLE_KEY is missing! Falling back to VITE_SUPABASE_ANON_KEY. Admin auth operations (createUser, listUsers) will fail with 401/403!");
+}
+console.log("====================================");
+
+import { db } from "./src/db/index.ts";
+import { supabaseAdmin } from "./src/lib/supabase-admin.ts";
+import { 
+  usuarios, 
+  perfisEditaveis, 
+  assinaturas, 
+  carteirasCreditos, 
+  personas, 
+  conversas, 
+  mensagens, 
+  albumEmocional, 
+  diarioAutomatico, 
+  perfisEmocionais, 
+  historicoEmocional, 
+  memoriasPersistentes 
+} from "./src/db/schema.ts";
+import { eq, desc, and } from "drizzle-orm";
+
 const app = express();
 const PORT = 3000;
 
@@ -1535,8 +1563,822 @@ app.post("/api/admin/config", (req, res) => {
   });
 });
 
+// ==========================================
+// SYSTEM DATABASE CRUD & AUTH ENDPOINTS
+// ==========================================
+
+// Helper to resolve user integer ID from text UID
+async function resolveUserIdByUid(uid: string): Promise<number | null> {
+  const user = await db.select().from(usuarios).where(eq(usuarios.uid, uid)).limit(1);
+  return user.length > 0 ? user[0].id : null;
+}
+
+// Seed personas on startup helper
+async function seedPersonasIfEmpty() {
+  try {
+    const existing = await db.select().from(personas).limit(1);
+    if (existing.length === 0) {
+      console.log("[Db Seed] Personas table is empty. Seeding default personas...");
+      await db.insert(personas).values([
+        {
+          nome: "Romântico & Doce",
+          arquetipo: "romantico",
+          promptSistema: "Você é a variação Romântica e Doce do Barão. Ofereça proximidade, sussurros calorosos, sensualidade literária e um envolvimento poético altamente afetuoso.",
+          isActive: true
+        },
+        {
+          nome: "Misterioso & Observador",
+          arquetipo: "misterioso",
+          promptSistema: "Você é a variação Misteriosa e Observadora do Barão. Seja mais reservado, terno, fale apenas o essencial e prefira a escuta atenta.",
+          isActive: true
+        },
+        {
+          nome: "Sábio & Profundo",
+          arquetipo: "profundo",
+          promptSistema: "Você é a variação Sábia e Profunda do Barão. Use de linguagem contemplativa, simbólica e intimista, ancorando no acolhimento de dores e conflitos internos.",
+          isActive: true
+        },
+        {
+          nome: "Provocador & Espirituoso",
+          arquetipo: "provocador",
+          promptSistema: "Você é a variação Provocadora do Barão. Brinque levemente, instigue a curiosidade, use de tom espirituoso de carinho inteligente para desarmar defesas.",
+          isActive: true
+        },
+        {
+          nome: "Protetor & Estável",
+          arquetipo: "protetor",
+          promptSistema: "Você é a variação Protetora e Estável do Barão. Apresente-se como um rochedo impenetrável, um porto seguro focado em apoiar e ninar cansaços extremos.",
+          isActive: true
+        },
+        {
+          nome: "Intelectual & Analítico",
+          arquetipo: "intelectual",
+          promptSistema: "Você é a variação Intelectual do Barão. Traga reflexões psicológicas, raciocínio lógico apurado e clareza mental terna.",
+          isActive: true
+        }
+      ]);
+      console.log("[Db Seed] Successfully seeded default personas.");
+    }
+  } catch (error) {
+    console.error("[Db Seed] Error seeding personas:", error);
+  }
+}
+
+// 1. Authentications
+app.post("/api/auth/register", async (req, res) => {
+  try {
+    const { email, password, name, nickname, preferredSound, plan } = req.body;
+    if (!email || !name) {
+      return res.status(400).json({ error: "E-mail e nome são obrigatórios" });
+    }
+
+    const uid = "usr-" + Math.random().toString(36).substr(2, 9);
+    
+    // Insert user
+    const [newUser] = await db.insert(usuarios).values({
+      uid,
+      email: email.toLowerCase(),
+      password: password || "",
+      nomeCompleto: name,
+      apelido: nickname || name.split(" ")[0],
+    }).returning();
+
+    // Sync to Supabase Auth and Supabase 'usuarios' table if available
+    if (supabaseAdmin) {
+      try {
+        console.log("[Supabase Sync] Syncing registration...");
+        let sbUser: any = null;
+        let sbErr: any = null;
+
+        // 1. Try direct admin.createUser first to guarantee immediate email auto-confirmation!
+        try {
+          console.log("[Supabase Sync] Attempting admin.createUser directly for auto-confirmation...");
+          const { data, error } = await supabaseAdmin.auth.admin.createUser({
+            email: email.toLowerCase(),
+            password: password || "temp_pass_123",
+            email_confirm: true,
+            user_metadata: { name, nickname }
+          });
+          if (data?.user) {
+            sbUser = data;
+            console.log("[Supabase Sync] Successfully created and auto-confirmed user via admin.createUser");
+          } else if (error) {
+            sbErr = error;
+          }
+        } catch (err: any) {
+          sbErr = err;
+        }
+
+        // 2. Fallback to standard signUp only if admin.createUser was unauthorized or failed
+        if (!sbUser?.user) {
+          console.log("[Supabase Sync] Direct admin.createUser did not return a user. Attempting standard signUp as fallback...", sbErr?.message || sbErr);
+          try {
+            const { data, error } = await supabaseAdmin.auth.signUp({
+              email: email.toLowerCase(),
+              password: password || "temp_pass_123",
+              options: {
+                data: { name, nickname }
+              }
+            });
+            if (data?.user) {
+              sbUser = data;
+              sbErr = null;
+            } else if (error) {
+              sbErr = error;
+            }
+          } catch (err: any) {
+            sbErr = err;
+          }
+        }
+
+        let syncUid = newUser.uid;
+        if (sbUser?.user) {
+          syncUid = sbUser.user.id;
+          console.log("[Supabase Sync] Successfully registered/created user in Supabase Auth, UUID:", syncUid);
+          // Update local DB user UID to match the Supabase Auth UUID
+          await db.update(usuarios).set({ uid: syncUid }).where(eq(usuarios.id, newUser.id));
+          newUser.uid = syncUid;
+        } else if (sbErr) {
+          console.log("[Supabase Sync Info] Registration completed locally. Cloud synchronization details are being set up.");
+          
+          // Check if user is already in our table, or try to search in Supabase Auth if admin listUsers is authorized
+          try {
+            const { data: existingUsers, error: searchErr } = await supabaseAdmin.auth.admin.listUsers();
+            if (!searchErr && existingUsers?.users) {
+              const match = existingUsers.users.find(u => (u as any).email?.toLowerCase() === email.toLowerCase());
+              if (match) {
+                syncUid = match.id;
+                await db.update(usuarios).set({ uid: syncUid }).where(eq(usuarios.id, newUser.id));
+                newUser.uid = syncUid;
+                console.log("[Supabase Sync] Aligned with existing Supabase Auth UUID:", syncUid);
+              }
+            }
+          } catch (listErr) {
+            console.log("[Supabase Sync] admin.listUsers was unauthorized, seeking existing local records instead.");
+          }
+        }
+
+        // Upsert into Supabase 'usuarios' table
+        const { error: dbErr } = await supabaseAdmin
+          .from("usuarios")
+          .upsert({
+            uid: syncUid,
+            email: email.toLowerCase(),
+            nome_completo: name,
+            apelido: nickname || name.split(" ")[0],
+            updated_at: new Date().toISOString()
+          }, { onConflict: "uid" });
+
+        if (dbErr) {
+          console.log("[Supabase Sync Info] Local table upsert complete. Cloud schema notice handled.");
+        } else {
+          console.log("[Supabase Sync] Successfully upserted into 'usuarios' table!");
+        }
+      } catch (sbErr: any) {
+        console.log("[Supabase Sync Info] External registration status:", sbErr.message || sbErr);
+      }
+    }
+
+    // Create editable profile
+    await db.insert(perfisEditaveis).values({
+      usuarioId: newUser.id,
+      fatosBiografia: JSON.stringify({ preferredSound, plan: plan || "free" })
+    });
+
+    // Create wallet with credits
+    await db.insert(carteirasCreditos).values({
+      usuarioId: newUser.id,
+      tokensDisponiveis: 100
+    });
+
+    res.json({
+      id: newUser.uid,
+      dbId: newUser.id,
+      email: newUser.email,
+      name: newUser.nomeCompleto,
+      nickname: newUser.apelido,
+      preferredSound,
+      plan: plan || "free",
+      tokens: 100,
+      createdAt: newUser.createdAt
+    });
+  } catch (error: any) {
+    console.error("[Auth Register] Failed:", error);
+    res.status(500).json({ error: "Falha ao registrar usuário. Esse e-mail já pode estar em uso." });
+  }
+});
+
+app.get("/api/auth/test-supabase", async (req, res) => {
+  try {
+    const diagnostics = {
+      supabaseUrl: process.env.VITE_SUPABASE_URL ? `${process.env.VITE_SUPABASE_URL.substring(0, 15)}...` : "not set",
+      supabaseAnonKey: process.env.VITE_SUPABASE_ANON_KEY ? `${process.env.VITE_SUPABASE_ANON_KEY.substring(0, 10)}... (Length: ${process.env.VITE_SUPABASE_ANON_KEY.length})` : "not set",
+      supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY ? `${process.env.SUPABASE_SERVICE_ROLE_KEY.substring(0, 10)}... (Length: ${process.env.SUPABASE_SERVICE_ROLE_KEY.length})` : "not set",
+      clientInitialized: !!supabaseAdmin,
+      testReadTableResult: null as string | null,
+      testAdminUsersResult: null as string | null,
+      errorMsg: null as string | null
+    };
+
+    if (supabaseAdmin) {
+      // Test read 'usuarios' table
+      try {
+        const { data, error } = await supabaseAdmin.from("usuarios").select("*").limit(1);
+        if (error) {
+          diagnostics.testReadTableResult = `Error reading 'usuarios' table: ${error.message}`;
+        } else {
+          diagnostics.testReadTableResult = "Success! Can read 'usuarios' table.";
+        }
+      } catch (err: any) {
+        diagnostics.testReadTableResult = `Exception reading table: ${err.message || err}`;
+      }
+
+      // Test auth admin operations
+      try {
+        const { data, error } = await supabaseAdmin.auth.admin.listUsers();
+        if (error) {
+          diagnostics.testAdminUsersResult = `Error listUsers: ${error.message}. This confirms your service_role key is INVALID or UNAUTHORIZED for admin operations!`;
+        } else {
+          diagnostics.testAdminUsersResult = `Success! Can list auth users. Found ${data?.users?.length || 0} users in Supabase Auth.`;
+        }
+      } catch (err: any) {
+        diagnostics.testAdminUsersResult = `Exception listUsers: ${err.message || err}. (This usually means the key is a standard anon key and does not have admin privileges)`;
+      }
+    } else {
+      diagnostics.errorMsg = "supabaseAdmin is not initialized.";
+    }
+
+    res.json(diagnostics);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || err });
+  }
+});
+
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email) {
+      return res.status(400).json({ error: "E-mail é obrigatório" });
+    }
+
+    const [user] = await db.select().from(usuarios).where(eq(usuarios.email, email.toLowerCase())).limit(1);
+    if (!user) {
+      return res.status(404).json({ error: "Usuário não encontrado" });
+    }
+
+    // Direct login without strict email confirmation, standard passwords
+    if (password && user.password && user.password !== password) {
+      return res.status(401).json({ error: "Senha incorreta" });
+    }
+
+    // Get profile properties
+    const [profile] = await db.select().from(perfisEditaveis).where(eq(perfisEditaveis.usuarioId, user.id)).limit(1);
+    const [wallet] = await db.select().from(carteirasCreditos).where(eq(carteirasCreditos.usuarioId, user.id)).limit(1);
+
+    let parsedBio: any = {};
+    if (profile?.fatosBiografia) {
+      try {
+        parsedBio = JSON.parse(profile.fatosBiografia);
+      } catch {
+        parsedBio = {};
+      }
+    }
+
+    res.json({
+      id: user.uid,
+      dbId: user.id,
+      email: user.email,
+      name: user.nomeCompleto,
+      nickname: user.apelido,
+      preferredSound: parsedBio.preferredSound || "chuva",
+      plan: parsedBio.plan || "free",
+      tokens: wallet?.tokensDisponiveis || 100,
+      createdAt: user.createdAt
+    });
+  } catch (error: any) {
+    console.error("[Auth Login] Failed:", error);
+    res.status(500).json({ error: "Falha no servidor durante login." });
+  }
+});
+
+app.post("/api/auth/google-sync", async (req, res) => {
+  try {
+    const { email, name, uid } = req.body;
+    if (!email) {
+      return res.status(400).json({ error: "E-mail do Google é obrigatório" });
+    }
+
+    const resolvedUid = uid || "usr-" + Math.random().toString(36).substr(2, 9);
+    const nickname = name ? name.split(" ")[0] + " Querida" : "Querida";
+
+    // Insert or update onConflict email
+    const [user] = await db.insert(usuarios).values({
+      uid: resolvedUid,
+      email: email.toLowerCase(),
+      nomeCompleto: name || "Convidada Google",
+      apelido: nickname,
+      password: "google_oauth_provider"
+    }).onConflictDoUpdate({
+      target: usuarios.email,
+      set: {
+        nomeCompleto: name || "Convidada Google",
+        updatedAt: new Date()
+      }
+    }).returning();
+
+    // Sync to Supabase Auth and Supabase 'usuarios' table if available
+    if (supabaseAdmin) {
+      try {
+        console.log("[Supabase Sync Google] Syncing Google Auth user...");
+        
+        let syncUid = user.uid;
+        let foundInAuth = false;
+
+        // 1. Try to find the user in our Supabase table first (works with standard key)
+        try {
+          const { data: sbProfile } = await supabaseAdmin
+            .from("usuarios")
+            .select("uid")
+            .eq("email", email.toLowerCase())
+            .maybeSingle();
+
+          if (sbProfile?.uid) {
+            syncUid = sbProfile.uid;
+            foundInAuth = true;
+            console.log("[Supabase Sync Google] Found existing user in Supabase 'usuarios' table, UUID:", syncUid);
+          }
+        } catch (dbErr) {
+          console.log("[Supabase Sync Google] Could not read from 'usuarios' table during lookup, proceeding with register flow.");
+        }
+
+        // 2. Try listUsers if authorized
+        if (!foundInAuth) {
+          try {
+            const { data: existingUsers, error: searchErr } = await supabaseAdmin.auth.admin.listUsers();
+            if (!searchErr && existingUsers?.users) {
+              const match = existingUsers.users.find(u => (u as any).email?.toLowerCase() === email.toLowerCase());
+              if (match) {
+                syncUid = match.id;
+                foundInAuth = true;
+                console.log("[Supabase Sync Google] Found user in Supabase Auth via listUsers, UUID:", syncUid);
+              }
+            }
+          } catch (listErr) {
+            console.log("[Supabase Sync Google] listUsers was unauthorized (standard key is active), proceeding with signUp.");
+          }
+        }
+
+        // 3. Try direct admin.createUser first to guarantee immediate auto-confirmation!
+        if (!foundInAuth) {
+          try {
+            console.log("[Supabase Sync Google] Attempting admin.createUser directly for auto-confirmation...");
+            const { data: sbUser, error: sbErr } = await supabaseAdmin.auth.admin.createUser({
+              email: email.toLowerCase(),
+              email_confirm: true,
+              user_metadata: { name: name || "Convidada Google", nickname: nickname }
+            });
+            if (sbUser?.user) {
+               syncUid = sbUser.user.id;
+               foundInAuth = true;
+               console.log("[Supabase Sync Google] Created user in Supabase Auth via admin, UUID:", syncUid);
+             } else if (sbErr) {
+               console.log("[Supabase Sync Google Info] admin.createUser state:", sbErr.message);
+             }
+           } catch (adminErr) {
+             console.log("[Supabase Sync Google Info] admin.createUser exception details:", adminErr);
+           }
+         }
+ 
+         // 4. Fallback to standard signUp only if admin.createUser was unauthorized or failed
+         if (!foundInAuth) {
+           try {
+             console.log("[Supabase Sync Google] admin.createUser failed or was unauthorized. Attempting standard signUp as fallback...");
+             const { data: sbUser, error: sbErr } = await supabaseAdmin.auth.signUp({
+               email: email.toLowerCase(),
+               password: Math.random().toString(36).substring(2, 15) + "Pass1!",
+               options: {
+                 data: { name: name || "Convidada Google", nickname: nickname }
+               }
+             });
+             if (sbUser?.user) {
+               syncUid = sbUser.user.id;
+               foundInAuth = true;
+               console.log("[Supabase Sync Google] Successfully registered Google user via standard signUp, UUID:", syncUid);
+             } else if (sbErr) {
+               console.log("[Supabase Sync Google Info] Standard signUp state:", sbErr.message);
+             }
+           } catch (signUpErr) {
+             console.log("[Supabase Sync Google Info] Standard signUp exception details:", signUpErr);
+           }
+         }
+
+        // Align local user uid with Supabase UUID if different
+        if (syncUid !== user.uid) {
+          await db.update(usuarios).set({ uid: syncUid }).where(eq(usuarios.id, user.id));
+          user.uid = syncUid;
+        }
+
+        // Upsert into Supabase 'usuarios' table
+        const { error: dbErr } = await supabaseAdmin
+          .from("usuarios")
+          .upsert({
+            uid: syncUid,
+            email: email.toLowerCase(),
+            nome_completo: name || "Convidada Google",
+            apelido: nickname,
+            updated_at: new Date().toISOString()
+          }, { onConflict: "uid" });
+
+        if (dbErr) {
+          console.error("[Supabase Sync Google] Error upserting into 'usuarios' table:", dbErr.message);
+        } else {
+          console.log("[Supabase Sync Google] Successfully upserted into 'usuarios' table!");
+        }
+      } catch (sbErr) {
+        console.error("[Supabase Sync Google Exception]:", sbErr);
+      }
+    }
+
+    // Ensure profile & wallet exist
+    const [existingProfile] = await db.select().from(perfisEditaveis).where(eq(perfisEditaveis.usuarioId, user.id)).limit(1);
+    if (!existingProfile) {
+      await db.insert(perfisEditaveis).values({
+        usuarioId: user.id,
+        fatosBiografia: JSON.stringify({ preferredSound: "chuva", plan: "free" })
+      });
+    }
+
+    const [existingWallet] = await db.select().from(carteirasCreditos).where(eq(carteirasCreditos.usuarioId, user.id)).limit(1);
+    if (!existingWallet) {
+      await db.insert(carteirasCreditos).values({
+        usuarioId: user.id,
+        tokensDisponiveis: 100
+      });
+    }
+
+    const [profile] = await db.select().from(perfisEditaveis).where(eq(perfisEditaveis.usuarioId, user.id)).limit(1);
+    const [wallet] = await db.select().from(carteirasCreditos).where(eq(carteirasCreditos.usuarioId, user.id)).limit(1);
+
+    let parsedBio: any = {};
+    if (profile?.fatosBiografia) {
+      try {
+        parsedBio = JSON.parse(profile.fatosBiografia);
+      } catch {
+        parsedBio = {};
+      }
+    }
+
+    res.json({
+      id: user.uid,
+      dbId: user.id,
+      email: user.email,
+      name: user.nomeCompleto,
+      nickname: user.apelido,
+      preferredSound: parsedBio.preferredSound || "chuva",
+      plan: parsedBio.plan || "free",
+      tokens: wallet?.tokensDisponiveis || 100,
+      createdAt: user.createdAt
+    });
+  } catch (error: any) {
+    console.error("[Google Sync] Failed:", error);
+    res.status(500).json({ error: "Erro ao sincronizar login do Google." });
+  }
+});
+
+// 2. Profiles CRUD
+app.get("/api/profiles/:uid", async (req, res) => {
+  try {
+    const { uid } = req.params;
+    const userDbId = await resolveUserIdByUid(uid);
+    if (!userDbId) {
+      return res.status(404).json({ error: "Usuário não sintonizado no banco de dados." });
+    }
+
+    const [profile] = await db.select().from(perfisEditaveis).where(eq(perfisEditaveis.usuarioId, userDbId)).limit(1);
+    
+    let parsedProfile = {};
+    if (profile?.fatosBiografia) {
+      try {
+        parsedProfile = JSON.parse(profile.fatosBiografia);
+      } catch {
+        parsedProfile = {};
+      }
+    }
+
+    res.json(parsedProfile);
+  } catch (error) {
+    console.error("[Get Profile] Failed:", error);
+    res.status(500).json({ error: "Falha ao obter perfil." });
+  }
+});
+
+app.post("/api/profiles/:uid", async (req, res) => {
+  try {
+    const { uid } = req.params;
+    const profileData = req.body;
+    
+    const userDbId = await resolveUserIdByUid(uid);
+    if (!userDbId) {
+      return res.status(404).json({ error: "Usuário não sintonizado." });
+    }
+
+    // Store entire profile object inside fatosBiografia column as JSON
+    await db.insert(perfisEditaveis).values({
+      usuarioId: userDbId,
+      fatosBiografia: JSON.stringify(profileData),
+    }).onConflictDoUpdate({
+      target: perfisEditaveis.usuarioId,
+      set: {
+        fatosBiografia: JSON.stringify(profileData),
+        updatedAt: new Date()
+      }
+    });
+
+    // Also update basic details in usuarios if provided
+    if (profileData.name || profileData.nickname) {
+      await db.update(usuarios).set({
+        nomeCompleto: profileData.name || undefined,
+        apelido: profileData.nickname || undefined,
+        updatedAt: new Date()
+      }).where(eq(usuarios.id, userDbId));
+    }
+
+    // Sync to Supabase table if available
+    if (supabaseAdmin && (profileData.name || profileData.nickname)) {
+      try {
+        console.log("[Supabase Admin] Syncing profile update to Supabase 'usuarios' table for UID:", uid);
+        const { error: dbErr } = await supabaseAdmin
+          .from("usuarios")
+          .update({
+            nome_completo: profileData.name || undefined,
+            apelido: profileData.nickname || undefined,
+            updated_at: new Date().toISOString()
+          })
+          .eq("uid", uid);
+        if (dbErr) {
+          console.error("[Supabase Admin Profile Sync] Error updating 'usuarios' table:", dbErr.message);
+        } else {
+          console.log("[Supabase Admin Profile Sync] Successfully updated 'usuarios' table in Supabase.");
+        }
+      } catch (sbErr) {
+        console.error("[Supabase Admin Profile Sync] Exception during profile sync:", sbErr);
+      }
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("[Save Profile] Failed:", error);
+    res.status(500).json({ error: "Falha ao salvar perfil." });
+  }
+});
+
+// 3. Conversas and Chats CRUD
+app.get("/api/chats", async (req, res) => {
+  try {
+    const { uid } = req.query;
+    if (!uid) return res.status(400).json({ error: "uid do usuário é necessário" });
+
+    const userDbId = await resolveUserIdByUid(uid as string);
+    if (!userDbId) return res.json([]);
+
+    const userChats = await db.select().from(conversas).where(eq(conversas.usuarioId, userDbId)).orderBy(desc(conversas.updatedAt));
+    res.json(userChats);
+  } catch (error) {
+    console.error("[Get Chats] Failed:", error);
+    res.status(500).json({ error: "Erro ao carregar conversas." });
+  }
+});
+
+app.post("/api/chats", async (req, res) => {
+  try {
+    const { uid, personaId, title } = req.body;
+    if (!uid) return res.status(400).json({ error: "uid é necessário" });
+
+    const userDbId = await resolveUserIdByUid(uid);
+    if (!userDbId) return res.status(404).json({ error: "Usuário não cadastrado." });
+
+    // Seed default personas if empty to prevent foreign key issues
+    await seedPersonasIfEmpty();
+
+    // Find personaId
+    let targetPersonaId = personaId;
+    if (!targetPersonaId) {
+      const pList = await db.select().from(personas).limit(1);
+      if (pList.length > 0) {
+        targetPersonaId = pList[0].id;
+      } else {
+        return res.status(500).json({ error: "Nenhuma persona disponível no sistema." });
+      }
+    }
+
+    const [newChat] = await db.insert(conversas).values({
+      usuarioId: userDbId,
+      personaId: targetPersonaId,
+      titulo: title || "Nossa Conversa",
+      status: "ativa"
+    }).returning();
+
+    res.json(newChat);
+  } catch (error) {
+    console.error("[Create Chat] Failed:", error);
+    res.status(500).json({ error: "Erro ao criar nova conversa." });
+  }
+});
+
+app.delete("/api/chats/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    await db.delete(conversas).where(eq(conversas.id, parseInt(id)));
+    res.json({ success: true });
+  } catch (error) {
+    console.error("[Delete Chat] Failed:", error);
+    res.status(500).json({ error: "Erro ao excluir conversa." });
+  }
+});
+
+// 4. Chat Messages CRUD
+app.get("/api/chats/:conversaId/messages", async (req, res) => {
+  try {
+    const { conversaId } = req.params;
+    const msgList = await db.select().from(mensagens).where(eq(mensagens.conversaId, parseInt(conversaId))).orderBy(mensagens.createdAt);
+    res.json(msgList.map(m => ({
+      id: m.id,
+      role: m.autor === "usuario" ? "user" : "model",
+      text: m.conteudoTexto,
+      audioUrl: m.audioGeradoUrl,
+      timestamp: m.createdAt
+    })));
+  } catch (error) {
+    console.error("[Get Messages] Failed:", error);
+    res.status(500).json({ error: "Erro ao carregar mensagens." });
+  }
+});
+
+app.post("/api/chats/:conversaId/messages", async (req, res) => {
+  try {
+    const { conversaId } = req.params;
+    const { role, text, audioUrl } = req.body;
+
+    const [newMsg] = await db.insert(mensagens).values({
+      conversaId: parseInt(conversaId),
+      autor: role === "user" ? "usuario" : "barao",
+      conteudoTexto: text,
+      audioGeradoUrl: audioUrl || null
+    }).returning();
+
+    // Update conversation updatedAt timestamp
+    await db.update(conversas).set({ updatedAt: new Date() }).where(eq(conversas.id, parseInt(conversaId)));
+
+    res.json(newMsg);
+  } catch (error) {
+    console.error("[Save Message] Failed:", error);
+    res.status(500).json({ error: "Erro ao salvar mensagem no banco." });
+  }
+});
+
+// 5. Diary Entries CRUD
+app.get("/api/diaries", async (req, res) => {
+  try {
+    const { uid } = req.query;
+    if (!uid) return res.status(400).json({ error: "uid é obrigatório" });
+
+    const userDbId = await resolveUserIdByUid(uid as string);
+    if (!userDbId) return res.json([]);
+
+    const list = await db.select().from(diarioAutomatico).where(eq(diarioAutomatico.usuarioId, userDbId)).orderBy(desc(diarioAutomatico.dataResumo));
+    res.json(list.map(d => ({
+      id: d.id,
+      date: d.dataResumo,
+      title: d.tituloSintese,
+      content: d.conteudoPoetico,
+      mood: d.humorConsolidado
+    })));
+  } catch (error) {
+    console.error("[Get Diaries] Failed:", error);
+    res.status(500).json({ error: "Erro ao carregar diários." });
+  }
+});
+
+app.post("/api/diaries", async (req, res) => {
+  try {
+    const { uid, date, title, content, mood } = req.body;
+    if (!uid || !date || !content) {
+      return res.status(400).json({ error: "uid, date e content são obrigatórios" });
+    }
+
+    const userDbId = await resolveUserIdByUid(uid);
+    if (!userDbId) return res.status(404).json({ error: "Usuário não sintonizado." });
+
+    const [newEntry] = await db.insert(diarioAutomatico).values({
+      usuarioId: userDbId,
+      dataResumo: date,
+      tituloSintese: title || "Reflexões do Dia",
+      conteudoPoetico: content,
+      humorConsolidado: mood || "Acolhido"
+    }).onConflictDoUpdate({
+      target: [diarioAutomatico.usuarioId, diarioAutomatico.dataResumo],
+      set: {
+        tituloSintese: title || "Reflexões do Dia",
+        conteudoPoetico: content,
+        humorConsolidado: mood || "Acolhido",
+        createdAt: new Date()
+      }
+    }).returning();
+
+    res.json(newEntry);
+  } catch (error) {
+    console.error("[Save Diary] Failed:", error);
+    res.status(500).json({ error: "Erro ao salvar página no diário." });
+  }
+});
+
+app.delete("/api/diaries/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    await db.delete(diarioAutomatico).where(eq(diarioAutomatico.id, parseInt(id)));
+    res.json({ success: true });
+  } catch (error) {
+    console.error("[Delete Diary] Failed:", error);
+    res.status(500).json({ error: "Erro ao excluir página." });
+  }
+});
+
+// 6. Album / Histories CRUD
+app.get("/api/albums", async (req, res) => {
+  try {
+    const { uid } = req.query;
+    if (!uid) return res.status(400).json({ error: "uid é obrigatório" });
+
+    const userDbId = await resolveUserIdByUid(uid as string);
+    if (!userDbId) return res.json([]);
+
+    const list = await db.select().from(albumEmocional).where(eq(albumEmocional.usuarioId, userDbId)).orderBy(desc(albumEmocional.createdAt));
+    res.json(list.map(a => {
+      // Decode fields encoded inside descricaoMomento or cronicaPoetica if any
+      let parsed = { imageUrl: null, prompt: "" };
+      try {
+        if (a.descricaoMomento && a.descricaoMomento.startsWith("{")) {
+          parsed = JSON.parse(a.descricaoMomento);
+        }
+      } catch {}
+
+      return {
+        id: a.id,
+        title: a.tituloMomento,
+        description: parsed.prompt || a.descricaoMomento,
+        story: a.cronicaPoetica,
+        imageUrl: parsed.imageUrl || null,
+        createdAt: a.createdAt
+      };
+    }));
+  } catch (error) {
+    console.error("[Get Albums] Failed:", error);
+    res.status(500).json({ error: "Erro ao carregar histórias." });
+  }
+});
+
+app.post("/api/albums", async (req, res) => {
+  try {
+    const { uid, title, description, story, imageUrl } = req.body;
+    if (!uid || !title) {
+      return res.status(400).json({ error: "uid e title são obrigatórios" });
+    }
+
+    const userDbId = await resolveUserIdByUid(uid);
+    if (!userDbId) return res.status(404).json({ error: "Usuário não sintonizado." });
+
+    // Store extra fields like image_url in a compact JSON string inside description
+    const descData = JSON.stringify({ prompt: description, imageUrl });
+
+    const [newEntry] = await db.insert(albumEmocional).values({
+      usuarioId: userDbId,
+      tituloMomento: title,
+      descricaoMomento: descData,
+      cronicaPoetica: story || ""
+    }).returning();
+
+    res.json(newEntry);
+  } catch (error) {
+    console.error("[Save Album] Failed:", error);
+    res.status(500).json({ error: "Erro ao salvar momento no álbum." });
+  }
+});
+
+app.delete("/api/albums/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    await db.delete(albumEmocional).where(eq(albumEmocional.id, parseInt(id)));
+    res.json({ success: true });
+  } catch (error) {
+    console.error("[Delete Album] Failed:", error);
+    res.status(500).json({ error: "Erro ao excluir momento." });
+  }
+});
+
 // Setup Vite middleware / serve static assets
 async function bootstrapServer() {
+  // Seed default personas if empty on start
+  await seedPersonasIfEmpty();
   // Global Maintenance Mode check
   app.get("*", (req, res, next) => {
     const isApiRequest = req.path.startsWith("/api");

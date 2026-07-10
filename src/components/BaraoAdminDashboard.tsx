@@ -23,7 +23,6 @@ import {
 } from "lucide-react";
 import { motion } from "motion/react";
 import { User } from "../types";
-import FirestoreAdmin from "./FirestoreAdmin";
 
 interface BaraoAdminDashboardProps {
   currentUser: User | null;
@@ -1161,10 +1160,6 @@ export default function BaraoAdminDashboard({ currentUser, onUserUpdate, onBack 
           </div>
         </div>
       </div>
-
-      {/* Real-time database management & seeder — admin-only tool, moved out of the
-          user-facing Evolução tab where it was previously (mistakenly) exposed. */}
-      <FirestoreAdmin />
     </div>
   );
 }

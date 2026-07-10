@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 
 import BaraoPaywall from "./BaraoPaywall";
-import { syncDiaryEntries, getDiaryEntries, getAllUserMessagesByDate } from "../utils/firebaseSync";
+import { syncDiaryEntries } from "../utils/supabaseSync";
 
 interface BaraoDiaryProps {
   currentUser: User | null;
@@ -47,6 +47,8 @@ export default function BaraoDiary({ currentUser, onPromptAuth, onUserUpdate }: 
     );
   }
 
+  const diaryStorageKey = currentUser ? `barao_diary_entries_${currentUser.id}` : "barao_diary_entries_guest";
+  const chatStorageKey = currentUser ? `barao_chat_messages_${currentUser.id}` : "barao_chat_messages_guest";
   const autoGenStorageKey = currentUser ? `barao_diary_auto_${currentUser.id}` : "barao_diary_auto_guest";
 
   // State
@@ -67,7 +69,7 @@ export default function BaraoDiary({ currentUser, onPromptAuth, onUserUpdate }: 
 
   // Load configuration and data
   useEffect(() => {
-    // 1. Auto Enabled flag (local UI preference, not user data)
+    // 1. Auto Enabled flag
     const savedAuto = localStorage.getItem(autoGenStorageKey);
     if (savedAuto !== null) {
       setIsAutoEnabled(savedAuto === "true");
@@ -76,24 +78,40 @@ export default function BaraoDiary({ currentUser, onPromptAuth, onUserUpdate }: 
       setIsAutoEnabled(true);
     }
 
-    if (!currentUser) {
+    // 2. Chat messages to cluster
+    const savedChats = localStorage.getItem(chatStorageKey);
+    if (savedChats) {
+      try {
+        setChatMessages(JSON.parse(savedChats));
+      } catch (e) {
+        setChatMessages([]);
+      }
+    } else {
       setChatMessages([]);
-      setDiaryEntries([]);
-      return;
     }
 
-    // 2. Chat messages across every conversation, to cluster by day
-    getAllUserMessagesByDate(currentUser.id).then(setChatMessages).catch(err => {
-      console.warn("[FirebaseSync Diary] Error loading chat history: ", err);
-      setChatMessages([]);
-    });
-
     // 3. Diary entries
-    getDiaryEntries(currentUser.id).then(setDiaryEntries).catch(err => {
-      console.warn("[FirebaseSync Diary] Error loading diary entries: ", err);
-      setDiaryEntries([]);
-    });
-  }, [currentUser, autoGenStorageKey]);
+    const savedEntries = localStorage.getItem(diaryStorageKey);
+    let parsedEntries: DiaryEntry[] = [];
+    if (savedEntries) {
+      try {
+        parsedEntries = JSON.parse(savedEntries);
+      } catch (e) {
+        parsedEntries = [];
+      }
+    }
+    setDiaryEntries(parsedEntries);
+
+    // Background merge with Firestore
+    if (currentUser) {
+      syncDiaryEntries(currentUser.id, parsedEntries).then(merged => {
+        setDiaryEntries(merged);
+        localStorage.setItem(diaryStorageKey, JSON.stringify(merged));
+      }).catch(err => {
+        console.warn("[FirebaseSync Diary] Error merging cloud diaries: ", err);
+      });
+    }
+  }, [currentUser, diaryStorageKey, chatStorageKey, autoGenStorageKey]);
 
   // Generate the rolling 7 days feed
   const getDaysFeed = () => {
@@ -210,6 +228,7 @@ export default function BaraoDiary({ currentUser, onPromptAuth, onUserUpdate }: 
 
       updatedEntries.push(newEntry);
       setDiaryEntries(updatedEntries);
+      localStorage.setItem(diaryStorageKey, JSON.stringify(updatedEntries));
       if (currentUser) {
         syncDiaryEntries(currentUser.id, updatedEntries).catch(err => {
           console.warn("[FirebaseSync Diary Gen]: ", err);
@@ -300,6 +319,7 @@ export default function BaraoDiary({ currentUser, onPromptAuth, onUserUpdate }: 
     }
 
     setDiaryEntries(updatedEntries);
+    localStorage.setItem(diaryStorageKey, JSON.stringify(updatedEntries));
     if (currentUser) {
       syncDiaryEntries(currentUser.id, updatedEntries).catch(err => {
         console.warn("[FirebaseSync Diary Edit]: ", err);
@@ -313,6 +333,7 @@ export default function BaraoDiary({ currentUser, onPromptAuth, onUserUpdate }: 
   const deleteDiaryEntry = (dayId: string) => {
     let updatedEntries = diaryEntries.filter(e => e.id !== dayId);
     setDiaryEntries(updatedEntries);
+    localStorage.setItem(diaryStorageKey, JSON.stringify(updatedEntries));
     if (currentUser) {
       syncDiaryEntries(currentUser.id, updatedEntries).catch(err => {
         console.warn("[FirebaseSync Diary Delete]: ", err);

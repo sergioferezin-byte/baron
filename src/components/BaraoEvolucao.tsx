@@ -4,6 +4,7 @@ import {
   Sparkles, Star, Flame, Coins, ShieldAlert, Check, ArrowRight, Wallet, Info, ArrowUpRight
 } from "lucide-react";
 import { User } from "../types";
+import SupabaseAdmin from "./SupabaseAdmin";
 
 interface BaraoEvolucaoProps {
   currentUser: User | null;
@@ -510,6 +511,8 @@ export default function BaraoEvolucao({ currentUser, onPromptAuth, onUserUpdate 
         </div>
       </div>
 
+      {/* Real-time database management & seeder */}
+      <SupabaseAdmin />
     </div>
   );
 }

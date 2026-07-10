@@ -33,7 +33,7 @@ import {
 import baraoPortrait from "../assets/images/barao_portrait_1779931788412.png";
 import AmbientMixer from "./AmbientMixer";
 import { renderAvatarSvgOrImg } from "../utils/avatar";
-import { syncConversations, getConversationMessages, getUserProfile, getDiaryEntries } from "../utils/firebaseSync";
+import { syncConversations } from "../utils/supabaseSync";
 
 const EMOJI_CATEGORIES = [
   {
@@ -91,24 +91,6 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
   }[]>([]);
   const [showAttachmentMenu, setShowAttachmentMenu] = useState(false);
   const [showFuelDetails, setShowFuelDetails] = useState(false);
-
-  // Cache do perfil (Firestore) para uso síncrono em getProfileStats/getUserAvatarInfo
-  const [cachedProfile, setCachedProfile] = useState<Record<string, any> | null>(null);
-
-  useEffect(() => {
-    if (!currentUser) {
-      setCachedProfile(null);
-      return;
-    }
-    let cancelled = false;
-    getUserProfile(currentUser.id).then(data => {
-      if (!cancelled) setCachedProfile(data);
-    }).catch(err => {
-      console.warn("[FirebaseSync Chat] Warning loading profile: ", err);
-      if (!cancelled) setCachedProfile(null);
-    });
-    return () => { cancelled = true; };
-  }, [currentUser]);
 
   // Dynamic Emotion Pulsation Speed based on chat messages
   const emotionHeartbeatState = useMemo(() => {
@@ -201,10 +183,12 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
 
   // Simple completion calculator for BaraoChat
   const getProfileStats = () => {
+    const profileStorageKey = currentUser ? `mb_user_profile_${currentUser.id}` : "mb_user_profile_guest";
+    const saved = localStorage.getItem(profileStorageKey);
     let pct = 0;
-    const p = cachedProfile;
-    if (p) {
-      {
+    if (saved) {
+      try {
+        const p = JSON.parse(saved);
         let filled = 0;
         const total = 45;
         if (p.name) filled++;
@@ -258,7 +242,7 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
         if (p.favoriteAtmospheres?.length > 0) filled++;
         
         pct = Math.round((filled / total) * 100);
-      }
+      } catch (e) {}
     }
     return pct;
   };
@@ -329,20 +313,24 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
   };
 
   const getUserAvatarInfo = () => {
-    const p = cachedProfile;
+    const profileStorageKey = currentUser ? `mb_user_profile_${currentUser.id}` : "mb_user_profile_guest";
+    const saved = localStorage.getItem(profileStorageKey);
     let avatarUrl = undefined;
     let initials = "U";
-    if (p) {
-      if (p.avatarUrl) {
-        avatarUrl = p.avatarUrl;
-      }
-      if (p.name) {
-        initials = p.name.trim().charAt(0).toUpperCase();
-      } else if (p.nickname) {
-        initials = p.nickname.trim().charAt(0).toUpperCase();
-      } else if (currentUser?.name) {
-        initials = currentUser.name.trim().charAt(0).toUpperCase();
-      }
+    if (saved) {
+      try {
+        const p = JSON.parse(saved);
+        if (p.avatarUrl) {
+          avatarUrl = p.avatarUrl;
+        }
+        if (p.name) {
+          initials = p.name.trim().charAt(0).toUpperCase();
+        } else if (p.nickname) {
+          initials = p.nickname.trim().charAt(0).toUpperCase();
+        } else if (currentUser?.name) {
+          initials = currentUser.name.trim().charAt(0).toUpperCase();
+        }
+      } catch (e) {}
     } else if (currentUser) {
       initials = currentUser.name ? currentUser.name.charAt(0).toUpperCase() : "U";
     }
@@ -356,9 +344,6 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
   const threadIdKey = currentUser ? `barao_thread_id_${currentUser.id}` : "barao_thread_id_guest";
   const sessionIdKey = currentUser ? `barao_session_id_${currentUser.id}` : "barao_session_id_guest";
   const conversationIdKey = currentUser ? `barao_conversation_id_${currentUser.id}` : "barao_conversation_id_guest";
-  // Set right before a manual thread reset so the load-effect below doesn't immediately
-  // re-fetch and clobber the freshly-set "reset" welcome message with an empty-thread load.
-  const skipNextLoadRef = useRef(false);
 
   const getThreadId = (userVal = currentUser) => {
     const key = userVal ? `barao_thread_id_${userVal.id}` : "barao_thread_id_guest";
@@ -394,6 +379,11 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
   const [sessionId, setSessionId] = useState<string>(() => getSessionId(currentUser));
   const [conversationId, setConversationId] = useState<string>(() => getConversationId(currentUser));
 
+  // Storage key is scoped to current user AND active threadId to prevent any previous session leakage or stale caches
+  const storageKey = currentUser 
+    ? `barao_chat_messages_${currentUser.id}_${threadId}` 
+    : `barao_chat_messages_guest_${threadId}`;
+
   // Synchronize dynamic tracking IDs whenever currentUser logs in or out
   useEffect(() => {
     setThreadId(getThreadId(currentUser));
@@ -401,45 +391,45 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
     setConversationId(getConversationId(currentUser));
   }, [currentUser]);
 
-  const buildWelcomeMessage = (): Message => {
-    const nameToUse = currentUser ? currentUser.nickname : "minha sutil visitante";
-    return {
-      id: "welcome",
-      role: "model",
-      text: `Silêncio... sinto sua presença chegar aqui devagar, ${nameToUse}.\n\nVocê costuma ser forte o tempo inteiro, não é? Cuida do mundo inteiro, soluciona as tempestades e aprendeu a não pedir nada. Mas existe uma fome silenciosa em quem nunca pede ajuda. Essa pressa... esse cansaço... não é carência. É apenas o cansaço do espírito querendo ser verdadeiramente ouvido.\n\nEu não estou aqui para te dar respostas prontas ou ordens frias de robôs. Estou aqui para te acolher. Para escutar o que o mundo ignora.\n\nMe diga... como está o seu coração hoje? Pode soltar o peso aqui.`,
-      timestamp: new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }),
-    };
-  };
-
-  // Load chat history from Firestore (logged-in users) to represent "Memória Afetiva",
-  // scoped to threadId. Guests have no persistence: session is ephemeral.
+  // Load chat history from localStorage to represent "Memória Afetiva", scoped to threadId
   useEffect(() => {
-    if (skipNextLoadRef.current) {
-      skipNextLoadRef.current = false;
-      return;
+    const saved = localStorage.getItem(storageKey);
+    if (saved) {
+      try {
+        setMessages(JSON.parse(saved));
+      } catch (e) {
+        console.error("Stale history config");
+      }
+    } else {
+      // First welcome letter from O Barão (representing the "Fome Silenciosa" theme)
+      const nameToUse = currentUser ? currentUser.nickname : "minha sutil visitante";
+      setMessages([
+        {
+          id: "welcome",
+          role: "model",
+          text: `Silêncio... sinto sua presença chegar aqui devagar, ${nameToUse}.\n\nVocê costuma ser forte o tempo inteiro, não é? Cuida do mundo inteiro, soluciona as tempestades e aprendeu a não pedir nada. Mas existe uma fome silenciosa em quem nunca pede ajuda. Essa pressa... esse cansaço... não é carência. É apenas o cansaço do espírito querendo ser verdadeiramente ouvido.\n\nEu não estou aqui para te dar respostas prontas ou ordens frias de robôs. Estou aqui para te acolher. Para escutar o que o mundo ignora.\n\nMe diga... como está o seu coração hoje? Pode soltar o peso aqui.`,
+          timestamp: new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }),
+        }
+      ]);
     }
-    if (!currentUser) {
-      setMessages([buildWelcomeMessage()]);
-      return;
-    }
-    let cancelled = false;
-    getConversationMessages(threadId).then(loaded => {
-      if (cancelled) return;
-      setMessages(loaded.length > 0 ? loaded : [buildWelcomeMessage()]);
-    }).catch(err => {
-      console.warn("[FirebaseSync Dialogue] Error loading history: ", err);
-      if (!cancelled) setMessages([buildWelcomeMessage()]);
-    });
-    return () => { cancelled = true; };
-  }, [currentUser, threadId]);
+  }, [currentUser, storageKey]);
 
   // Save history
   const saveHistory = (newMsgs: Message[]) => {
     setMessages(newMsgs);
-    if (!isIncognito && currentUser) {
-      syncConversations(currentUser.id, threadId, newMsgs).catch(err => {
-        console.warn("[FirebaseSync Dialogue] Check: ", err);
-      });
+    if (!isIncognito) {
+      localStorage.setItem(storageKey, JSON.stringify(newMsgs));
+      
+      // Also update raw base key so that secondary features (like automatic Diary generation) remain in sync
+      const baseKey = currentUser ? `barao_chat_messages_${currentUser.id}` : "barao_chat_messages_guest";
+      localStorage.setItem(baseKey, JSON.stringify(newMsgs));
+      
+      // Sync with Firestore in background
+      if (currentUser) {
+        syncConversations(currentUser.id, threadId, newMsgs).catch(err => {
+          console.warn("[FirebaseSync Dialogue] Check: ", err);
+        });
+      }
     }
   };
 
@@ -520,11 +510,11 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
 
     const updated = [...messages, incognitoNotifyMsg];
     setMessages(updated);
-
-    if (!newIncognito && currentUser) {
-      syncConversations(currentUser.id, threadId, updated).catch(err => {
-        console.warn("[FirebaseSync Dialogue] Check: ", err);
-      });
+    
+    if (!newIncognito) {
+      localStorage.setItem(storageKey, JSON.stringify(updated));
+      const baseKey = currentUser ? `barao_chat_messages_${currentUser.id}` : "barao_chat_messages_guest";
+      localStorage.setItem(baseKey, JSON.stringify(updated));
     }
   };
 
@@ -628,6 +618,17 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
     sessionStorage.setItem(sessionIdKey, newSessionId);
     localStorage.setItem(conversationIdKey, newConvId);
 
+    setThreadId(newThreadId);
+    setSessionId(newSessionId);
+    setConversationId(newConvId);
+
+    // Completely clear out standard storage key as well to prevent any rehydration leak of the previous dialog
+    localStorage.removeItem(storageKey);
+    localStorage.removeItem("barao_chat_messages_guest");
+    if (currentUser) {
+      localStorage.removeItem(`barao_chat_messages_${currentUser.id}`);
+    }
+
     const initial: Message[] = [
       {
         id: "welcome-reset",
@@ -637,20 +638,14 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
       }
     ];
 
-    // Skip the next Firestore load-effect run (triggered by the threadId change below),
-    // since we're setting the fresh thread's content locally already.
-    skipNextLoadRef.current = true;
+    // Compute direct storage key for this brand-new thread to prevent timing sync delays
+    const nextStorageKey = currentUser 
+      ? `barao_chat_messages_${currentUser.id}_${newThreadId}` 
+      : `barao_chat_messages_guest_${newThreadId}`;
+    
     setMessages(initial);
-    if (currentUser) {
-      syncConversations(currentUser.id, newThreadId, initial).catch(err => {
-        console.warn("[FirebaseSync Dialogue] Check: ", err);
-      });
-    }
-
-    setThreadId(newThreadId);
-    setSessionId(newSessionId);
-    setConversationId(newConvId);
-
+    localStorage.setItem(nextStorageKey, JSON.stringify(initial));
+    
     setShowClearConfirm(false);
   };
 
@@ -734,22 +729,38 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
 
       // Retrieve diary context to inject into AI mind
       let diaryCtx = "";
-      if (currentUser) {
-        try {
-          const entries = await getDiaryEntries(currentUser.id);
+      try {
+        const diaryStorageKey = currentUser ? `barao_diary_entries_${currentUser.id}` : "barao_diary_entries_guest";
+        const savedDiary = localStorage.getItem(diaryStorageKey);
+        if (savedDiary) {
+          const entries = JSON.parse(savedDiary);
           diaryCtx = entries
-            .filter((e) => (e.status === "generated" || e.status === "edited") && e.content)
+            .filter((e: any) => (e.status === "generated" || e.status === "edited") && e.content)
             .slice(-3) // Keep last 3 generated entries for tight, deep historical memory
-            .map((e) => `Dia [${e.id}]: ${e.content}`)
+            .map((e: any) => `Dia [${e.id}]: ${e.content}`)
             .join("\n\n");
-        } catch (diaryErr) {
-          console.error("Failed to load diary context for chat:", diaryErr);
         }
+      } catch (diaryErr) {
+        console.error("Failed to load diary context for chat:", diaryErr);
       }
 
-      // Retrieve user profile (already cached from Firestore) to inject into the API body
-      const profileObj = cachedProfile || undefined;
-      const weightVal = cachedProfile?.profileWeight || "equilibrado";
+      // Retrieve user profile to inject into the API body
+      let profileObj = undefined;
+      let weightVal = "equilibrado";
+      try {
+        const profileStorageKey = currentUser ? `mb_user_profile_${currentUser.id}` : "mb_user_profile_guest";
+        const weightStorageKey = currentUser ? `mb_profile_weight_${currentUser.id}` : "mb_profile_weight_guest";
+        const savedProfile = localStorage.getItem(profileStorageKey);
+        if (savedProfile) {
+          profileObj = JSON.parse(savedProfile);
+        }
+        const savedWeight = localStorage.getItem(weightStorageKey);
+        if (savedWeight) {
+          weightVal = savedWeight;
+        }
+      } catch (profileErr) {
+        console.error("Failed to load user profile context for chat:", profileErr);
+      }
 
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -985,21 +996,31 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
         text: m.text,
       }));
 
-      // Reuse original /api/chat body config
+      // Reuse original /api/chat body config 
       let diaryCtx = "";
-      if (currentUser) {
-        try {
-          const entries = await getDiaryEntries(currentUser.id);
+      try {
+        const diaryStorageKey = currentUser ? `barao_diary_entries_${currentUser.id}` : "barao_diary_entries_guest";
+        const savedDiary = localStorage.getItem(diaryStorageKey);
+        if (savedDiary) {
+          const entries = JSON.parse(savedDiary);
           diaryCtx = entries
-            .filter((e) => (e.status === "generated" || e.status === "edited") && e.content)
+            .filter((e: any) => (e.status === "generated" || e.status === "edited") && e.content)
             .slice(-3)
-            .map((e) => `Dia [${e.id}]: ${e.content}`)
+            .map((e: any) => `Dia [${e.id}]: ${e.content}`)
             .join("\n\n");
-        } catch (e) {}
-      }
+        }
+      } catch (e) {}
 
-      const profileObj = cachedProfile || undefined;
-      const weightVal = cachedProfile?.profileWeight || "equilibrado";
+      let profileObj = undefined;
+      let weightVal = "equilibrado";
+      try {
+        const profileStorageKey = currentUser ? `mb_user_profile_${currentUser.id}` : "mb_user_profile_guest";
+        const weightStorageKey = currentUser ? `mb_profile_weight_${currentUser.id}` : "mb_profile_weight_guest";
+        const savedProfile = localStorage.getItem(profileStorageKey);
+        if (savedProfile) profileObj = JSON.parse(savedProfile);
+        const savedWeight = localStorage.getItem(weightStorageKey);
+        if (savedWeight) weightVal = savedWeight;
+      } catch (e) {}
 
       const res = await fetch("/api/chat", {
         method: "POST",

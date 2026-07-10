@@ -25,7 +25,7 @@ import {
 } from "lucide-react";
 
 import BaraoPaywall from "./BaraoPaywall";
-import { syncHistoryEntries, getHistoryEntries } from "../utils/firebaseSync";
+import { syncHistoryEntries } from "../utils/supabaseSync";
 
 interface BaraoHistoryProps {
   currentUser: User | null;
@@ -48,6 +48,7 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
     );
   }
 
+  const historyStorageKey = currentUser ? `barao_history_entries_${currentUser.id}` : "barao_history_entries_guest";
   const featureToggleKey = currentUser ? `barao_history_enabled_${currentUser.id}` : "barao_history_enabled_guest";
 
   // Core state
@@ -73,7 +74,7 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
 
   // Load persistence
   useEffect(() => {
-    // 1. Feature Enabled Toggle (local UI preference, not user data)
+    // 1. Feature Enabled Toggle
     const savedToggle = localStorage.getItem(featureToggleKey);
     if (savedToggle !== null) {
       setIsFeatureEnabled(savedToggle === "true");
@@ -82,17 +83,28 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
       setIsFeatureEnabled(true);
     }
 
-    // 2. Load History entries from Firestore
-    if (!currentUser) {
-      setHistoryList([]);
-      return;
+    // 2. Load History entries
+    const savedEntries = localStorage.getItem(historyStorageKey);
+    let parsedEntries: HistoryEntry[] = [];
+    if (savedEntries) {
+      try {
+        parsedEntries = JSON.parse(savedEntries);
+      } catch (err) {
+        parsedEntries = [];
+      }
     }
+    setHistoryList(parsedEntries);
 
-    getHistoryEntries(currentUser.id).then(setHistoryList).catch(err => {
-      console.warn("[FirebaseSync History] Error loading records: ", err);
-      setHistoryList([]);
-    });
-  }, [currentUser, featureToggleKey]);
+    // Dynamic background merge with Firestore lifeEvents
+    if (currentUser) {
+      syncHistoryEntries(currentUser.id, parsedEntries).then(merged => {
+        setHistoryList(merged);
+        localStorage.setItem(historyStorageKey, JSON.stringify(merged));
+      }).catch(err => {
+        console.warn("[FirebaseSync History] Error merging cloud records: ", err);
+      });
+    }
+  }, [currentUser, historyStorageKey, featureToggleKey]);
 
   // Handle Feature configuration toggle
   const handleToggleFeature = () => {
@@ -114,7 +126,7 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
       setStoryError("Por favor sintonize apenas arquivos de imagem reais.");
       return;
     }
-    // Limit to 4MB client-side upload size
+    // Limit to 4MB for localStorage comfort
     if (file.size > 4 * 1024 * 1024) {
       setStoryError("Escolha um retrato menor que 4MB para guardarmos com leveza em seu baú.");
       return;
@@ -233,6 +245,7 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
 
       const updated = [newEntry, ...historyList];
       setHistoryList(updated);
+      localStorage.setItem(historyStorageKey, JSON.stringify(updated));
       if (currentUser) {
         syncHistoryEntries(currentUser.id, updated).catch(err => {
           console.warn("[FirebaseSync History Add]: ", err);
@@ -263,6 +276,7 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
         return entry;
       });
       setHistoryList(updated);
+      localStorage.setItem(historyStorageKey, JSON.stringify(updated));
       if (currentUser) {
         syncHistoryEntries(currentUser.id, updated).catch(err => {
           console.warn("[FirebaseSync History Regenerate]: ", err);
@@ -279,6 +293,7 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
   const handleDeleteEntry = (id: string) => {
     const updated = historyList.filter(e => e.id !== id);
     setHistoryList(updated);
+    localStorage.setItem(historyStorageKey, JSON.stringify(updated));
     if (currentUser) {
       syncHistoryEntries(currentUser.id, updated).catch(err => {
         console.warn("[FirebaseSync History Delete]: ", err);

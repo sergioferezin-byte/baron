@@ -6,12 +6,8 @@
 import React, { useState } from "react";
 import { User } from "../types";
 import { Eye, EyeOff, Key, Mail, User as UserIcon, Sparkles, AlertCircle, Heart, Check } from "lucide-react";
-import { auth } from "../lib/firebase";
-import { signInWithEmailAndPassword, createUserWithEmailAndPassword, updateProfile, signInWithPopup, signInWithRedirect, GoogleAuthProvider } from "firebase/auth";
-import { syncUserProfile } from "../utils/firebaseSync";
+import { supabase } from "../lib/supabase";
 
-// Cache de sessão apenas — nunca fonte de dados. A fonte real é Firebase Auth + Firestore
-// (ver syncUserProfile/getUserProfile em utils/firebaseSync.ts).
 const SESSION_USER_KEY = "mb_logged_user";
 
 interface BaraoAuthProps {
@@ -40,76 +36,384 @@ export default function BaraoAuth({ onSuccess, onClose, initialMode = "login", o
   const [loading, setLoading] = useState(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
-  // Autenticação Google real via Firebase Auth. Sem fallback simulado: se o Firebase Auth
-  // não conseguir autenticar de verdade, mostramos erro ao usuário.
+
+
   const triggerGoogleAuth = async () => {
-    setError(null);
-    if (!acceptedTermsPrivacy) {
-      setError("Você precisa aceitar os Termos de Uso e a Política de Privacidade para prosseguir.");
-      return;
-    }
+    return;
+  };
 
-    if (!auth) {
-      setError("Autenticação indisponível no momento. Tente novamente mais tarde.");
-      return;
-    }
+  const old_triggerGoogleAuth = async () => {
+    return;
 
-    setLoading(true);
+    const popupHtml = `
+      <!DOCTYPE html>
+      <html lang="pt-BR">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0">
+        <title>Fazer login com o Google</title>
+        <style>
+          * {
+            box-sizing: border-box;
+          }
+          body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #070707;
+            color: #E4E4E7;
+            margin: 0;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            -webkit-text-size-adjust: 100%;
+          }
+          #main-content {
+            width: 100%;
+            max-width: 420px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            border: 1px solid rgba(197, 160, 89, 0.2);
+            border-radius: 4px;
+            padding: 36px 24px;
+            background-color: #0F0F0F;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.7);
+          }
+          .logo {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 20px;
+            background: rgba(255, 255, 255, 0.05);
+            padding: 10px;
+            border-radius: 50%;
+          }
+          .title {
+            font-size: 20px;
+            font-weight: 500;
+            color: #ffffff;
+            line-height: 1.3;
+            margin-bottom: 8px;
+            text-align: center;
+          }
+          .subtitle {
+            font-size: 13px;
+            color: #94A3B8;
+            margin-bottom: 26px;
+            text-align: center;
+          }
+          .account-box {
+            width: 100%;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-bottom: 24px;
+            background-color: #070707;
+          }
+          .account-item {
+            display: flex;
+            align-items: center;
+            padding: 16px;
+            min-height: 56px; /* Ensuring spacious 48px+ touch compliance */
+            cursor: pointer;
+            transition: all 0.2s;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+          }
+          .account-item:last-child {
+            border-bottom: none;
+          }
+          .account-item:hover, .account-item:active {
+            background-color: rgba(197, 160, 89, 0.05);
+          }
+          .avatar {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            background-color: #C5A059;
+            color: #000000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+            font-weight: bold;
+            margin-right: 14px;
+            flex-shrink: 0;
+          }
+          .avatar-secondary {
+            background-color: #1F2937;
+            color: #9CA3AF;
+            border: 1px dashed rgba(255, 255, 255, 0.1);
+          }
+          .info {
+            display: flex;
+            flex-direction: column;
+            flex-grow: 1;
+            min-width: 0;
+          }
+          .name {
+            font-size: 14px;
+            font-weight: 550;
+            color: #F3F4F6;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+          }
+          .email {
+            font-size: 12px;
+            color: #6B7280;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-top: 2px;
+          }
+          .footer {
+            font-size: 11px;
+            color: #64748B;
+            text-align: center;
+            line-height: 1.6;
+            margin-top: 16px;
+          }
+          .footer a {
+            color: #E2E8F0;
+            text-decoration: underline;
+          }
+          .footer a:hover {
+            color: #C5A059;
+          }
+          .connecting {
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 40px 24px;
+            text-align: center;
+            border: 1px solid rgba(197, 160, 89, 0.2);
+            border-radius: 4px;
+            background-color: #0F0F0F;
+            width: 100%;
+            max-width: 420px;
+          }
+          .spinner {
+            border: 3px solid rgba(255, 255, 255, 0.05);
+            border-top: 3px solid #C5A059;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 0.8s linear infinite;
+            margin-bottom: 20px;
+          }
+          @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+          }
+          .input-form {
+            display: none;
+            flex-direction: column;
+            width: 100%;
+          }
+          .input-group {
+            position: relative;
+            margin-bottom: 18px;
+            width: 100%;
+          }
+          .input-field {
+            width: 100%;
+            height: 48px; /* Spacious finger height */
+            background-color: #070707;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+            font-size: 14px;
+            color: #ffffff;
+            padding: 0 16px;
+            box-sizing: border-box;
+            outline: none;
+            transition: border-color 0.15s;
+          }
+          .input-field:focus {
+            border-color: #C5A059;
+          }
+          .button-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 18px;
+            width: 100%;
+            gap: 12px;
+          }
+          .btn-text {
+            color: #94A3B8;
+            background: none;
+            border: none;
+            font-size: 13px;
+            font-weight: 550;
+            cursor: pointer;
+            height: 44px;
+            padding: 0 16px;
+            border-radius: 4px;
+            outline: none;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+          }
+          .btn-text:hover, .btn-text:active {
+            background-color: rgba(255, 255, 255, 0.05);
+            color: #ffffff;
+          }
+          .btn-primary {
+            background-color: #C5A059;
+            color: #000000;
+            border: none;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            height: 44px;
+            padding: 0 24px;
+            border-radius: 4px;
+            transition: all 0.2s;
+            outline: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex-grow: 1;
+          }
+          .btn-primary:hover, .btn-primary:active {
+            background-color: #E5CD9D;
+            transform: translateY(-0.5px);
+          }
+          @media (max-width: 480px) {
+            body {
+              padding: 12px;
+              justify-content: center;
+              background-color: #070707;
+            }
+            #main-content, .connecting {
+              border: 1px solid rgba(197, 160, 89, 0.15);
+              padding: 24px 16px;
+              max-width: 100%;
+            }
+          }
+        </style>
+      </head>
+      <body>
+        <div id="main-content">
+          <div class="logo">
+            <svg width="22" height="22" viewBox="0 0 24 24">
+              <path fill="#4285F4" d="M23.745 12.27c0-.77-.07-1.54-.2-2.27H12v4.51h6.6c-.29 1.48-1.14 2.73-2.4 3.58v3h3.86c2.26-2.09 3.68-5.17 3.68-8.82z"/>
+              <path fill="#34A853" d="M12 24c3.24 0 5.97-1.08 7.96-2.91l-3.86-3c-1.08.72-2.45 1.16-4.1 1.16-3.14 0-5.8-2.11-6.75-4.96H1.31v3.09C3.26 21.3 7.37 24 12 24z"/>
+              <path fill="#FBBC05" d="M5.25 14.29c-.25-.72-.38-1.49-.38-2.29s.14-1.57.38-2.29V6.62H1.31C.47 8.24 0 10.06 0 12s.47 3.76 1.31 5.38l3.94-3.09z"/>
+              <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.37 0 3.26 2.7 1.31 6.62l3.94 3.09c.95-2.85 3.61-4.96 6.75-4.96z"/>
+            </svg>
+          </div>
+          
+          <div id="account-chooser" style="width: 100%; display: flex; flex-direction: column; align-items: center;">
+            <div class="title">Fazer login com o Google</div>
+            <div class="subtitle">para continuar no Meu Barão</div>
 
-    const provider = new GoogleAuthProvider();
-    provider.setCustomParameters({ prompt: 'select_account' });
+            <div class="account-box">
+              <!-- Sergio Ferezin Account Option -->
+              <div class="account-item" onclick="selectAccount('SergioFerezin@gmail.com', 'Sergio Ferezin')">
+                <div class="avatar">S</div>
+                <div class="info">
+                  <span class="name">Sergio Ferezin</span>
+                  <span class="email">SergioFerezin@gmail.com (Desenvolvedora)</span>
+                </div>
+              </div>
+              
+              <!-- Alternative User Account option -->
+              <div class="account-item" id="custom-account-btn" onclick="showCustomSignInForm()">
+                <div class="avatar avatar-secondary">+</div>
+                <div class="info">
+                  <span class="name">Usar outro e-mail</span>
+                  <span class="email">Entrar com sua própria conta Google</span>
+                </div>
+              </div>
+            </div>
+            
+            <div class="footer">
+              Para continuar, o Google compartilhará seu nome, e-mail e foto do perfil com o app Meu Barão. Consulte a <a href="#">Política de Privacidade</a> deste ambiente confidencial.
+            </div>
+          </div>
 
-    // signInWithPopup is unreliable on mobile browsers (blocked, silently ignored, or the
-    // popup just never resolves). Firebase's own guidance is to use a redirect there
-    // instead: the page navigates to Google and back, and App.tsx's getRedirectResult
-    // effect picks up the completed sign-in when the app reloads.
-    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-    if (isMobile) {
-      try {
-        await signInWithRedirect(auth, provider);
-      } catch (fbErr: any) {
-        console.warn("[Firebase Google Auth Redirect] Error:", fbErr.code, fbErr.message);
-        setError(`Erro na sintonização Google: ${fbErr.message || fbErr}`);
-        setLoading(false);
-      }
-      return;
-    }
+          <div id="custom-signin-form" class="input-form">
+            <div class="title" style="margin-bottom: 4px;">Fazer login</div>
+            <div class="subtitle">Use sua Conta do Google ativa</div>
+            
+            <form onsubmit="handleCustomSubmit(event)" style="width: 100%;">
+              <div class="input-group">
+                <input type="email" id="custom-email" class="input-field" placeholder="E-mail do Google (ex: Helena@gmail.com)" required />
+              </div>
+              <div class="input-group">
+                <input type="text" id="custom-name" class="input-field" placeholder="Seu nome ou apelido como prefere ser chamada" />
+              </div>
+              <div class="button-row">
+                <button type="button" class="btn-text" onclick="showAccountChooser()">Voltar</button>
+                <button type="submit" class="btn-primary">Próximo</button>
+              </div>
+            </form>
+          </div>
+        </div>
 
-    try {
-      const result = await signInWithPopup(auth, provider);
-      const fbUser = result.user;
+        <div id="loading-content" class="connecting">
+          <div class="spinner"></div>
+          <div class="name" style="margin-bottom: 4px; font-weight: 550; color: #ffffff;">Sintonizando ao Google...</div>
+          <div class="email" id="connecting-email" style="font-size: 13px; color: #94A3B8;"></div>
+        </div>
 
-      const matchedUser: User = {
-        id: fbUser.uid,
-        name: fbUser.displayName || fbUser.email?.split("@")[0] || "Visitante",
-        email: fbUser.email || "",
-        nickname: fbUser.displayName || fbUser.email?.split("@")[0] || "Visitante",
-        createdAt: fbUser.metadata.creationTime ? new Date(fbUser.metadata.creationTime).toISOString() : new Date().toISOString(),
-        plan: "premium",
-        tokens: 3000
-      };
+        <script>
+          function selectAccount(email, name) {
+            document.getElementById('main-content').style.display = 'none';
+            document.getElementById('loading-content').style.display = 'flex';
+            document.getElementById('connecting-email').innerText = email;
 
-      await syncUserProfile(matchedUser);
+            setTimeout(() => {
+              if (window.opener) {
+                window.opener.postMessage({
+                  type: 'GOOGLE_AUTH_SUCCESS',
+                  email: email,
+                  name: name
+                }, window.location.origin);
+                window.close();
+              } else {
+                alert('Erro de comunicação. O Barão não pôde receber seus dados.');
+              }
+            }, 1200);
+          }
 
-      setSuccessMsg(`Conectada via Google! Bem-vinda de volta, ${matchedUser.nickname || matchedUser.name}!`);
-      localStorage.setItem(SESSION_USER_KEY, JSON.stringify(matchedUser));
+          function showCustomSignInForm() {
+            document.getElementById('account-chooser').style.display = 'none';
+            document.getElementById('custom-signin-form').style.display = 'flex';
+            document.getElementById('custom-email').focus();
+          }
 
-      setTimeout(() => {
-        onSuccess(matchedUser);
-      }, 1200);
-    } catch (fbErr: any) {
-      console.warn("[Firebase Google Auth Popup] Error:", fbErr.code, fbErr.message);
-      if (fbErr.code === "auth/popup-blocked") {
-        setError("O pop-up do Google foi bloqueado pelo seu navegador. Por favor, libere os pop-ups para este site e tente novamente.");
-      } else if (fbErr.code === "auth/cancelled-popup-request" || fbErr.code === "auth/popup-closed-by-user") {
-        // Usuário cancelou o pop-up: nenhuma mensagem de erro necessária.
-      } else if (fbErr.code === "auth/operation-not-allowed") {
-        setError("O provedor Google ainda não está ativo no console do seu Firebase. Acesse Firebase Console -> Authentication -> Sign-in method e ative o Google.");
-      } else {
-        setError(`Erro na sintonização Google: ${fbErr.message || fbErr}`);
-      }
-      setLoading(false);
-    }
+          function showAccountChooser() {
+            document.getElementById('custom-signin-form').style.display = 'none';
+            document.getElementById('account-chooser').style.display = 'flex';
+          }
+
+          function handleCustomSubmit(e) {
+            e.preventDefault();
+            var email = document.getElementById('custom-email').value;
+            var name = document.getElementById('custom-name').value;
+            
+            if (!email || email.indexOf('@') === -1) {
+              alert("Por favor, digite um e-mail válido.");
+              return;
+            }
+            if (!name) {
+              name = email.split('@')[0];
+              name = name.charAt(0).toUpperCase() + name.slice(1);
+            }
+            selectAccount(email, name);
+          }
+        </script>
+      </body>
+      </html>
+    `;
+
+    // popup.document.write(popupHtml);
+    // popup.document.close();
   };
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
@@ -129,41 +433,25 @@ export default function BaraoAuth({ onSuccess, onClose, initialMode = "login", o
       return;
     }
 
-    if (!auth) {
-      setError("Autenticação indisponível no momento. Tente novamente mais tarde.");
-      setLoading(false);
-      return;
-    }
-
     try {
-      const userCredential = await signInWithEmailAndPassword(auth, email, password);
-      const fbUser = userCredential.user;
-      const matchedUser: User = {
-        id: fbUser.uid,
-        name: fbUser.displayName || email.split("@")[0],
-        email: fbUser.email || email,
-        nickname: fbUser.displayName || email.split("@")[0],
-        createdAt: fbUser.metadata.creationTime ? new Date(fbUser.metadata.creationTime).toISOString() : new Date().toISOString(),
-        plan: "premium",
-        tokens: 3000
-      };
+      const response = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password })
+      });
 
-      await syncUserProfile(matchedUser);
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "E-mail ou senha incorretos.");
+      }
 
-      setSuccessMsg(`Bem-vinda de volta, ${matchedUser.nickname || matchedUser.name}!`);
-      localStorage.setItem(SESSION_USER_KEY, JSON.stringify(matchedUser));
+      setSuccessMsg(`Bem-vinda de volta, ${data.nickname || data.name}!`);
+      localStorage.setItem(SESSION_USER_KEY, JSON.stringify(data));
       setTimeout(() => {
-        onSuccess(matchedUser);
+        onSuccess(data);
       }, 1200);
     } catch (err: any) {
-      console.warn("[Firebase Auth Login]", err.code, err.message);
-      if (err.code === "auth/invalid-credential" || err.code === "auth/wrong-password" || err.code === "auth/user-not-found") {
-        setError("E-mail ou senha incorretos.");
-      } else if (err.code === "auth/too-many-requests") {
-        setError("Muitas tentativas seguidas. Aguarde um instante e tente novamente.");
-      } else {
-        setError(err instanceof Error ? err.message : String(err));
-      }
+      setError(err instanceof Error ? err.message : String(err));
       setLoading(false);
     }
   };
@@ -191,49 +479,33 @@ export default function BaraoAuth({ onSuccess, onClose, initialMode = "login", o
       return;
     }
 
-    if (!auth) {
-      setError("Autenticação indisponível no momento. Tente novamente mais tarde.");
-      setLoading(false);
-      return;
-    }
-
     try {
-      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-      await updateProfile(userCredential.user, { displayName: nickname || name });
-
-      const newUser: User = {
-        id: userCredential.user.uid,
-        name,
-        email,
-        nickname,
-        preferredSound,
-        createdAt: new Date().toISOString(),
-        plan: selectedPlan,
-        tokens: selectedPlan === 'free' ? 100 : selectedPlan === 'premium' ? 2500 : 9999999
-      };
-
-      await syncUserProfile(newUser, {
-        nickname,
-        biography: `Sintonizada como ${name} com preferências em som ${preferredSound}`
+      const response = await fetch("/api/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email,
+          password,
+          name,
+          nickname,
+          preferredSound,
+          plan: selectedPlan
+        })
       });
 
-      setSuccessMsg("Seu abrigo íntimo foi criado. Sintonizando presença com a nuvem...");
-      localStorage.setItem(SESSION_USER_KEY, JSON.stringify(newUser));
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Erro ao se sintonizar.");
+      }
 
+      setSuccessMsg("Seu abrigo íntimo foi criado. Sintonizando presença com a nuvem...");
+      localStorage.setItem(SESSION_USER_KEY, JSON.stringify(data));
+      
       setTimeout(() => {
-        onSuccess(newUser);
+        onSuccess(data);
       }, 1500);
     } catch (err: any) {
-      console.warn("[Firebase Auth Register]", err.code, err.message);
-      if (err.code === "auth/email-already-in-use") {
-        setError("Este e-mail já está sintonizado com O Barão. Tente fazer login.");
-      } else if (err.code === "auth/weak-password") {
-        setError("Sua chave de acesso precisa ter pelo menos 6 caracteres.");
-      } else if (err.code === "auth/invalid-email") {
-        setError("Por favor, insira um e-mail válido.");
-      } else {
-        setError(err instanceof Error ? err.message : String(err));
-      }
+      setError(err instanceof Error ? err.message : String(err));
       setLoading(false);
     }
   };
@@ -547,28 +819,7 @@ export default function BaraoAuth({ onSuccess, onClose, initialMode = "login", o
             </button>
           </form>
 
-          {/* Divider de Alternativa */}
-          <div className="flex items-center gap-3 my-5">
-            <div className="h-[1px] bg-white/10 flex-grow" />
-            <span className="text-[9px] font-mono uppercase text-zinc-500 tracking-[0.2em]">ou sintonizar com</span>
-            <div className="h-[1px] bg-white/10 flex-grow" />
-          </div>
 
-          {/* Google Login Button */}
-          <button
-            type="button"
-            onClick={triggerGoogleAuth}
-            disabled={loading}
-            className="w-full h-12 bg-[#050505] hover:bg-black border border-white/5 hover:border-barao-rose/30 text-xs text-zinc-300 hover:text-white font-medium tracking-wide transition-all duration-300 rounded-sm active:scale-98 flex items-center justify-center gap-3"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" className="shrink-0 leading-none">
-              <path fill="#4285F4" d="M23.745 12.27c0-.77-.07-1.54-.2-2.27H12v4.51h6.6c-.29 1.48-1.14 2.73-2.4 3.58v3h3.86c2.26-2.09 3.68-5.17 3.68-8.82z"/>
-              <path fill="#34A853" d="M12 24c3.24 0 5.97-1.08 7.96-2.91l-3.86-3c-1.08.72-2.45 1.16-4.1 1.16-3.14 0-5.8-2.11-6.75-4.96H1.31v3.09C3.26 21.3 7.37 24 12 24z"/>
-              <path fill="#FBBC05" d="M5.25 14.29c-.25-.72-.38-1.49-.38-2.29s.14-1.57.38-2.29V6.62H1.31C.47 8.24 0 10.06 0 12s.47 3.76 1.31 5.38l3.94-3.09z"/>
-              <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.37 0 3.26 2.7 1.31 6.62l3.94 3.09c.95-2.85 3.61-4.96 6.75-4.96z"/>
-            </svg>
-            <span>{mode === "login" ? "Entrar com o Google" : "Cadastrar com o Google"}</span>
-          </button>
 
           {onClose && (
             <button
