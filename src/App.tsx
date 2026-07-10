@@ -23,7 +23,7 @@ import MeuBarao from "./components/MeuBarao"; // Import customized Baron managem
 import BaraoAdminDashboard from "./components/BaraoAdminDashboard"; // Import modular admin control panel
 import baraoBackground from "./assets/images/barao_portrait_1779931788412.png";
 import { auth } from "./lib/firebase";
-import { onAuthStateChanged, signInWithEmailAndPassword } from "firebase/auth";
+import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
 
 type ActiveTab = "home" | "dialogo" | "refugio" | "universo" | "evolucao" | "meubarao" | "privacy" | "terms" | "admin";
 
@@ -174,6 +174,15 @@ export default function App() {
     }
   };
 
+  // Ends the real Firebase session first — otherwise onAuthStateChanged still sees a
+  // signed-in user and immediately logs them back in right after handleUserUpdate(null).
+  const handleLogout = () => {
+    if (auth) {
+      signOut(auth).catch(err => console.warn("[Firebase Auth] Erro ao sair:", err));
+    }
+    handleUserUpdate(null);
+  };
+
   return (
     <div className={`text-zinc-100 selection:bg-barao-rose selection:text-barao-deep relative font-sans ${
       activeTab === "dialogo"
@@ -298,10 +307,7 @@ export default function App() {
                   {renderAvatarSvgOrImg(userAvatar, (currentUser.nickname || currentUser.name || "U").slice(0, 1), "w-8 h-8 rounded-sm")}
                 </div>
                 <button
-                  onClick={() => {
-                    localStorage.removeItem(SESSION_USER_KEY);
-                    setCurrentUser(null);
-                  }}
+                  onClick={handleLogout}
                   className="px-2.5 py-1.5 border border-white/10 hover:border-rose-950 hover:text-red-300 transition-all duration-300 text-[9px] uppercase font-mono tracking-wider rounded-sm text-zinc-400 bg-black flex items-center gap-1.5"
                   title="Sair do Abrigo"
                 >
@@ -328,7 +334,7 @@ export default function App() {
             activeTab={activeTab}
             setActiveTab={setActiveTab}
             currentUser={currentUser}
-            setCurrentUser={setCurrentUser}
+            onLogout={handleLogout}
             onSintonizar={() => {
               setAuthInitialMode("login");
               setShowAuthModal(true);
