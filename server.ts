@@ -1776,7 +1776,10 @@ app.post("/api/auth/register", async (req, res) => {
     res.json(await buildUserResponse(newUser, session));
   } catch (error: any) {
     console.error("[Auth Register] Failed:", error);
-    res.status(500).json({ error: "Falha ao registrar usuário. Tente novamente." });
+    res.status(500).json({
+      error: "Falha ao registrar usuário. Tente novamente.",
+      detail: [error?.code, error?.message, error?.cause?.message].filter(Boolean).join(" | ") || String(error)
+    });
   }
 });
 
