@@ -1736,8 +1736,7 @@ app.post("/api/auth/register", async (req, res) => {
         return res.status(alreadyExists ? 409 : 502).json({
           error: alreadyExists
             ? "Este e-mail já está cadastrado na autenticação. Faça login para entrar."
-            : "Não foi possível criar sua conta na autenticação. Tente novamente em instantes.",
-          detail: [ (createErr as any)?.status, (createErr as any)?.code, createErr?.message ].filter(Boolean).join(" | ")
+            : "Não foi possível criar sua conta na autenticação. Tente novamente em instantes."
         });
       }
 
@@ -1777,10 +1776,7 @@ app.post("/api/auth/register", async (req, res) => {
     res.json(await buildUserResponse(newUser, session));
   } catch (error: any) {
     console.error("[Auth Register] Failed:", error);
-    res.status(500).json({
-      error: "Falha ao registrar usuário. Tente novamente.",
-      detail: [error?.code, error?.message, error?.cause?.message].filter(Boolean).join(" | ") || String(error)
-    });
+    res.status(500).json({ error: "Falha ao registrar usuário. Tente novamente." });
   }
 });
 
