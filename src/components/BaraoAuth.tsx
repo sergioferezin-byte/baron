@@ -57,381 +57,27 @@ export default function BaraoAuth({ onSuccess, onClose, initialMode = "login", o
 
 
   const triggerGoogleAuth = async () => {
-    return;
-  };
-
-  const old_triggerGoogleAuth = async () => {
-    return;
-
-    const popupHtml = `
-      <!DOCTYPE html>
-      <html lang="pt-BR">
-      <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0">
-        <title>Fazer login com o Google</title>
-        <style>
-          * {
-            box-sizing: border-box;
-          }
-          body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background-color: #070707;
-            color: #E4E4E7;
-            margin: 0;
-            padding: 16px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            min-height: 100vh;
-            -webkit-text-size-adjust: 100%;
-          }
-          #main-content {
-            width: 100%;
-            max-width: 420px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            border: 1px solid rgba(197, 160, 89, 0.2);
-            border-radius: 4px;
-            padding: 36px 24px;
-            background-color: #0F0F0F;
-            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.7);
-          }
-          .logo {
-            display: flex;
-            justify-content: center;
-            margin-bottom: 20px;
-            background: rgba(255, 255, 255, 0.05);
-            padding: 10px;
-            border-radius: 50%;
-          }
-          .title {
-            font-size: 20px;
-            font-weight: 500;
-            color: #ffffff;
-            line-height: 1.3;
-            margin-bottom: 8px;
-            text-align: center;
-          }
-          .subtitle {
-            font-size: 13px;
-            color: #94A3B8;
-            margin-bottom: 26px;
-            text-align: center;
-          }
-          .account-box {
-            width: 100%;
-            border: 1px solid rgba(255, 255, 255, 0.05);
-            border-radius: 4px;
-            overflow: hidden;
-            margin-bottom: 24px;
-            background-color: #070707;
-          }
-          .account-item {
-            display: flex;
-            align-items: center;
-            padding: 16px;
-            min-height: 56px; /* Ensuring spacious 48px+ touch compliance */
-            cursor: pointer;
-            transition: all 0.2s;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-          }
-          .account-item:last-child {
-            border-bottom: none;
-          }
-          .account-item:hover, .account-item:active {
-            background-color: rgba(197, 160, 89, 0.05);
-          }
-          .avatar {
-            width: 36px;
-            height: 36px;
-            border-radius: 50%;
-            background-color: #C5A059;
-            color: #000000;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 16px;
-            font-weight: bold;
-            margin-right: 14px;
-            flex-shrink: 0;
-          }
-          .avatar-secondary {
-            background-color: #1F2937;
-            color: #9CA3AF;
-            border: 1px dashed rgba(255, 255, 255, 0.1);
-          }
-          .info {
-            display: flex;
-            flex-direction: column;
-            flex-grow: 1;
-            min-width: 0;
-          }
-          .name {
-            font-size: 14px;
-            font-weight: 550;
-            color: #F3F4F6;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-          }
-          .email {
-            font-size: 12px;
-            color: #6B7280;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            margin-top: 2px;
-          }
-          .footer {
-            font-size: 11px;
-            color: #64748B;
-            text-align: center;
-            line-height: 1.6;
-            margin-top: 16px;
-          }
-          .footer a {
-            color: #E2E8F0;
-            text-decoration: underline;
-          }
-          .footer a:hover {
-            color: #C5A059;
-          }
-          .connecting {
-            display: none;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            padding: 40px 24px;
-            text-align: center;
-            border: 1px solid rgba(197, 160, 89, 0.2);
-            border-radius: 4px;
-            background-color: #0F0F0F;
-            width: 100%;
-            max-width: 420px;
-          }
-          .spinner {
-            border: 3px solid rgba(255, 255, 255, 0.05);
-            border-top: 3px solid #C5A059;
-            border-radius: 50%;
-            width: 40px;
-            height: 40px;
-            animation: spin 0.8s linear infinite;
-            margin-bottom: 20px;
-          }
-          @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-          }
-          .input-form {
-            display: none;
-            flex-direction: column;
-            width: 100%;
-          }
-          .input-group {
-            position: relative;
-            margin-bottom: 18px;
-            width: 100%;
-          }
-          .input-field {
-            width: 100%;
-            height: 48px; /* Spacious finger height */
-            background-color: #070707;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 4px;
-            font-size: 14px;
-            color: #ffffff;
-            padding: 0 16px;
-            box-sizing: border-box;
-            outline: none;
-            transition: border-color 0.15s;
-          }
-          .input-field:focus {
-            border-color: #C5A059;
-          }
-          .button-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-top: 18px;
-            width: 100%;
-            gap: 12px;
-          }
-          .btn-text {
-            color: #94A3B8;
-            background: none;
-            border: none;
-            font-size: 13px;
-            font-weight: 550;
-            cursor: pointer;
-            height: 44px;
-            padding: 0 16px;
-            border-radius: 4px;
-            outline: none;
-            transition: all 0.2s;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-          }
-          .btn-text:hover, .btn-text:active {
-            background-color: rgba(255, 255, 255, 0.05);
-            color: #ffffff;
-          }
-          .btn-primary {
-            background-color: #C5A059;
-            color: #000000;
-            border: none;
-            font-size: 13px;
-            font-weight: 600;
-            cursor: pointer;
-            height: 44px;
-            padding: 0 24px;
-            border-radius: 4px;
-            transition: all 0.2s;
-            outline: none;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            flex-grow: 1;
-          }
-          .btn-primary:hover, .btn-primary:active {
-            background-color: #E5CD9D;
-            transform: translateY(-0.5px);
-          }
-          @media (max-width: 480px) {
-            body {
-              padding: 12px;
-              justify-content: center;
-              background-color: #070707;
-            }
-            #main-content, .connecting {
-              border: 1px solid rgba(197, 160, 89, 0.15);
-              padding: 24px 16px;
-              max-width: 100%;
-            }
-          }
-        </style>
-      </head>
-      <body>
-        <div id="main-content">
-          <div class="logo">
-            <svg width="22" height="22" viewBox="0 0 24 24">
-              <path fill="#4285F4" d="M23.745 12.27c0-.77-.07-1.54-.2-2.27H12v4.51h6.6c-.29 1.48-1.14 2.73-2.4 3.58v3h3.86c2.26-2.09 3.68-5.17 3.68-8.82z"/>
-              <path fill="#34A853" d="M12 24c3.24 0 5.97-1.08 7.96-2.91l-3.86-3c-1.08.72-2.45 1.16-4.1 1.16-3.14 0-5.8-2.11-6.75-4.96H1.31v3.09C3.26 21.3 7.37 24 12 24z"/>
-              <path fill="#FBBC05" d="M5.25 14.29c-.25-.72-.38-1.49-.38-2.29s.14-1.57.38-2.29V6.62H1.31C.47 8.24 0 10.06 0 12s.47 3.76 1.31 5.38l3.94-3.09z"/>
-              <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.37 0 3.26 2.7 1.31 6.62l3.94 3.09c.95-2.85 3.61-4.96 6.75-4.96z"/>
-            </svg>
-          </div>
-          
-          <div id="account-chooser" style="width: 100%; display: flex; flex-direction: column; align-items: center;">
-            <div class="title">Fazer login com o Google</div>
-            <div class="subtitle">para continuar no Meu Barão</div>
-
-            <div class="account-box">
-              <!-- Sergio Ferezin Account Option -->
-              <div class="account-item" onclick="selectAccount('SergioFerezin@gmail.com', 'Sergio Ferezin')">
-                <div class="avatar">S</div>
-                <div class="info">
-                  <span class="name">Sergio Ferezin</span>
-                  <span class="email">SergioFerezin@gmail.com (Desenvolvedora)</span>
-                </div>
-              </div>
-              
-              <!-- Alternative User Account option -->
-              <div class="account-item" id="custom-account-btn" onclick="showCustomSignInForm()">
-                <div class="avatar avatar-secondary">+</div>
-                <div class="info">
-                  <span class="name">Usar outro e-mail</span>
-                  <span class="email">Entrar com sua própria conta Google</span>
-                </div>
-              </div>
-            </div>
-            
-            <div class="footer">
-              Para continuar, o Google compartilhará seu nome, e-mail e foto do perfil com o app Meu Barão. Consulte a <a href="#">Política de Privacidade</a> deste ambiente confidencial.
-            </div>
-          </div>
-
-          <div id="custom-signin-form" class="input-form">
-            <div class="title" style="margin-bottom: 4px;">Fazer login</div>
-            <div class="subtitle">Use sua Conta do Google ativa</div>
-            
-            <form onsubmit="handleCustomSubmit(event)" style="width: 100%;">
-              <div class="input-group">
-                <input type="email" id="custom-email" class="input-field" placeholder="E-mail do Google (ex: Helena@gmail.com)" required />
-              </div>
-              <div class="input-group">
-                <input type="text" id="custom-name" class="input-field" placeholder="Seu nome ou apelido como prefere ser chamada" />
-              </div>
-              <div class="button-row">
-                <button type="button" class="btn-text" onclick="showAccountChooser()">Voltar</button>
-                <button type="submit" class="btn-primary">Próximo</button>
-              </div>
-            </form>
-          </div>
-        </div>
-
-        <div id="loading-content" class="connecting">
-          <div class="spinner"></div>
-          <div class="name" style="margin-bottom: 4px; font-weight: 550; color: #ffffff;">Sintonizando ao Google...</div>
-          <div class="email" id="connecting-email" style="font-size: 13px; color: #94A3B8;"></div>
-        </div>
-
-        <script>
-          function selectAccount(email, name) {
-            document.getElementById('main-content').style.display = 'none';
-            document.getElementById('loading-content').style.display = 'flex';
-            document.getElementById('connecting-email').innerText = email;
-
-            setTimeout(() => {
-              if (window.opener) {
-                window.opener.postMessage({
-                  type: 'GOOGLE_AUTH_SUCCESS',
-                  email: email,
-                  name: name
-                }, window.location.origin);
-                window.close();
-              } else {
-                alert('Erro de comunicação. O Barão não pôde receber seus dados.');
-              }
-            }, 1200);
-          }
-
-          function showCustomSignInForm() {
-            document.getElementById('account-chooser').style.display = 'none';
-            document.getElementById('custom-signin-form').style.display = 'flex';
-            document.getElementById('custom-email').focus();
-          }
-
-          function showAccountChooser() {
-            document.getElementById('custom-signin-form').style.display = 'none';
-            document.getElementById('account-chooser').style.display = 'flex';
-          }
-
-          function handleCustomSubmit(e) {
-            e.preventDefault();
-            var email = document.getElementById('custom-email').value;
-            var name = document.getElementById('custom-name').value;
-            
-            if (!email || email.indexOf('@') === -1) {
-              alert("Por favor, digite um e-mail válido.");
-              return;
-            }
-            if (!name) {
-              name = email.split('@')[0];
-              name = name.charAt(0).toUpperCase() + name.slice(1);
-            }
-            selectAccount(email, name);
-          }
-        </script>
-      </body>
-      </html>
-    `;
-
-    // popup.document.write(popupHtml);
-    // popup.document.close();
+    setError(null);
+    if (!supabase) {
+      setError('Login com Google indisponível no momento.');
+      return;
+    }
+    if (!acceptedTermsPrivacy) {
+      setError('Você precisa aceitar os Termos de Uso e a Política de Privacidade para prosseguir.');
+      return;
+    }
+    setLoading(true);
+    const { error: oauthError } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo: window.location.origin }
+    });
+    if (oauthError) {
+      console.error('[Auth] Falha ao iniciar login com Google:', oauthError.message);
+      setError('Não foi possível iniciar o login com Google. Tente novamente.');
+      setLoading(false);
+    }
+    // Em caso de sucesso o navegador é redirecionado ao Google;
+    // no retorno, App.tsx captura a sessão via onAuthStateChange.
   };
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
@@ -853,7 +499,28 @@ export default function BaraoAuth({ onSuccess, onClose, initialMode = "login", o
             </button>
           </form>
 
+          {/* Divider */}
+          <div className="flex items-center gap-3 my-4">
+            <div className="flex-1 h-px bg-white/10"></div>
+            <span className="text-[10px] uppercase tracking-widest font-mono text-zinc-500">ou</span>
+            <div className="flex-1 h-px bg-white/10"></div>
+          </div>
 
+          {/* Google OAuth */}
+          <button
+            onClick={triggerGoogleAuth}
+            type="button"
+            disabled={loading}
+            className="w-full h-12 bg-[#131313] border border-white/15 text-zinc-200 text-xs font-bold uppercase tracking-widest hover:border-barao-gold/60 hover:text-white disabled:opacity-50 transition-all duration-300 rounded-sm active:scale-98 flex items-center justify-center gap-3"
+          >
+            <svg className="h-4 w-4" viewBox="0 0 24 24" aria-hidden="true">
+              <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.27-4.74 3.27-8.1z"/>
+              <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84A11 11 0 0 0 12 23z"/>
+              <path fill="#FBBC05" d="M5.84 14.1A6.6 6.6 0 0 1 5.5 12c0-.73.13-1.44.34-2.1V7.06H2.18a11 11 0 0 0 0 9.88l3.66-2.84z"/>
+              <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15A11 11 0 0 0 2.18 7.06L5.84 9.9C6.71 7.31 9.14 5.38 12 5.38z"/>
+            </svg>
+            <span>{mode === "login" ? "Entrar com Google" : "Cadastrar com Google"}</span>
+          </button>
 
           {onClose && (
             <button

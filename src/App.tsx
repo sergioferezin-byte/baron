@@ -23,6 +23,7 @@ import MeuBarao from "./components/MeuBarao"; // Import customized Baron managem
 import BaraoAdminDashboard from "./components/BaraoAdminDashboard"; // Import modular admin control panel
 import baraoBackground from "./assets/images/barao_portrait_1779931788412.png";
 import { supabase } from "./lib/supabase";
+import { apiFetch } from "./utils/supabaseSync";
 
 type ActiveTab = "home" | "dialogo" | "refugio" | "universo" | "evolucao" | "meubarao" | "privacy" | "terms" | "admin";
 
@@ -124,15 +125,37 @@ export default function App() {
       if (sbUser) {
         console.log("[Supabase Auth State] Sintonizado conectado:", sbUser.id, sbUser.email);
         if (!currentUser || currentUser.id !== sbUser.id) {
-          const matchedUser: User = {
+          let matchedUser: User = {
             id: sbUser.id,
             name: sbUser.user_metadata?.name || sbUser.email?.split("@")[0] || "Visitante",
             email: sbUser.email || "",
             nickname: sbUser.user_metadata?.nickname || sbUser.email?.split("@")[0] || "Visitante",
             createdAt: sbUser.created_at || new Date().toISOString(),
-            plan: "premium",
-            tokens: 3000
+            plan: "free",
+            tokens: 100
           };
+
+          // Garante a linha na tabela 'usuarios' (necessária para diários,
+          // conversas e álbum) e carrega plano/tokens reais do banco.
+          // Cobre principalmente o retorno do OAuth (Google), quando o
+          // cadastro não passou pelo /api/auth/register.
+          try {
+            const res = await apiFetch("/api/auth/google-sync", {
+              method: "POST",
+              body: JSON.stringify({
+                uid: sbUser.id,
+                email: sbUser.email,
+                name: sbUser.user_metadata?.name || sbUser.user_metadata?.full_name || ""
+              })
+            });
+            if (res.ok) {
+              const data = await res.json();
+              matchedUser = { ...matchedUser, ...data, id: data.id || sbUser.id };
+            }
+          } catch (syncErr) {
+            console.error("[Supabase Auth State] Falha ao sincronizar perfil no banco:", syncErr);
+          }
+
           setCurrentUser(matchedUser);
           localStorage.setItem(SESSION_USER_KEY, JSON.stringify(matchedUser));
         }

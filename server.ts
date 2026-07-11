@@ -1919,14 +1919,17 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
-app.post("/api/auth/google-sync", async (req, res) => {
+app.post("/api/auth/google-sync", requireAuth, async (req: AuthRequest, res) => {
   try {
-    const { email, name, uid } = req.body;
-    if (!email) {
+    const { email, name } = req.body;
+    // Com token válido, a identidade vem do token — nunca do body
+    const uid = req.user?.id || req.body.uid;
+    const effectiveEmail = req.user?.email || email;
+    if (!effectiveEmail) {
       return res.status(400).json({ error: "E-mail do Google é obrigatório" });
     }
 
-    const normalizedEmail = String(email).toLowerCase();
+    const normalizedEmail = String(effectiveEmail).toLowerCase();
     const nickname = name ? name.split(" ")[0] + " Querida" : "Querida";
 
     // Resolve the Supabase Auth UUID first (create the Auth account if needed)
