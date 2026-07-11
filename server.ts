@@ -1780,6 +1780,17 @@ app.post("/api/auth/register", async (req, res) => {
   }
 });
 
+// Health check: reports DB and Supabase configuration status
+app.get("/api/health", async (req, res) => {
+  const dbOk = await checkDbConnection();
+  res.status(dbOk ? 200 : 503).json({
+    database: dbOk ? "ok" : "falha — verifique DATABASE_URL",
+    databaseUrlConfigured: !!process.env.DATABASE_URL,
+    supabaseAuth: supabaseAdmin ? "ok" : "não configurado — verifique SUPABASE_SERVICE_ROLE_KEY",
+    geminiKeyConfigured: !!process.env.GEMINI_API_KEY
+  });
+});
+
 app.get("/api/auth/test-supabase", async (req, res) => {
   try {
     const diagnostics = {
