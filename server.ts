@@ -309,6 +309,49 @@ function getGeminiClient(): GoogleGenAI {
   return aiClient;
 }
 
+// DeepSeek (API compatível com OpenAI) — usado exclusivamente no chat principal.
+// Os demais recursos (diário, crônicas, músicas, meditação) continuam no Gemini.
+const DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions";
+const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-chat";
+
+interface DeepSeekMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+async function callDeepSeek(
+  messages: DeepSeekMessage[],
+  options: { temperature?: number; topP?: number } = {}
+): Promise<string> {
+  const key = process.env.DEEPSEEK_API_KEY;
+  if (!key) {
+    throw new Error("⚠️ DEEPSEEK_API_KEY environment variable is not defined.");
+  }
+
+  const response = await fetch(DEEPSEEK_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${key}`
+    },
+    body: JSON.stringify({
+      model: DEEPSEEK_MODEL,
+      messages,
+      temperature: options.temperature ?? 0.9,
+      top_p: options.topP ?? 0.95,
+      stream: false
+    })
+  });
+
+  if (!response.ok) {
+    const errBody = await response.text().catch(() => "");
+    throw new Error(`DeepSeek API error ${response.status}: ${errBody}`);
+  }
+
+  const data = await response.json();
+  return data?.choices?.[0]?.message?.content || "";
+}
+
 const CONVERSATIONAL_RHYTHM = `
 ════════ HUMANIZE CHAT & MESSAGE DYNAMICS (ULTRA-CRITICAL RULE) ════════
 
@@ -770,14 +813,12 @@ app.post("/api/chat", async (req, res) => {
       return res.status(400).json({ error: "Message is required" });
     }
 
-    if (!process.env.GEMINI_API_KEY) {
+    if (!process.env.DEEPSEEK_API_KEY) {
       return res.status(200).json({
-        text: "Olá... Peço desculpas, mas meu coração (chave de API) ainda não foi sintonizado no painel de segredos deste espaço. Por favor, adicione a `GEMINI_API_KEY` para que musas possam iniciar nossa conversa profunda e sussurrada. Estou no aguardo da sua presença.",
+        text: "Olá... Peço desculpas, mas meu coração (chave de API) ainda não foi sintonizado no painel de segredos deste espaço. Por favor, adicione a `DEEPSEEK_API_KEY` para que musas possam iniciar nossa conversa profunda e sussurrada. Estou no aguardo da sua presença.",
         isConfigError: true
       });
     }
-
-    const ai = getGeminiClient();
 
     let dynamicSystemInstruction = `${systemPromptOverride || SYSTEM_PROMPT}\n\n${CONVERSATIONAL_RHYTHM}\n\n${MEMORY_RULES}`;
 
@@ -906,53 +947,23 @@ ${formatted}`;
       }
     }
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.1-flash-lite",
-      contents: contents,
-      config: {
-        systemInstruction: dynamicSystemInstruction,
-        temperature: 0.9,
-        topP: 0.95,
-        safetySettings: [
-          {
-            category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-            threshold: "BLOCK_NONE",
-          },
-          {
-            category: "HARM_CATEGORY_HARASSMENT",
-            threshold: "BLOCK_NONE",
-          },
-          {
-            category: "HARM_CATEGORY_HATE_SPEECH",
-            threshold: "BLOCK_NONE",
-          },
-          {
-            category: "HARM_CATEGORY_DANGEROUS_CONTENT",
-            threshold: "BLOCK_NONE",
-          },
-        ] as any
-      },
-    });
+    // Convert the alternating dialog into DeepSeek (OpenAI-compatible) messages,
+    // with the persona instructions as the system message
+    const deepSeekMessages: DeepSeekMessage[] = [
+      { role: "system", content: dynamicSystemInstruction },
+      ...contents.map(c => ({
+        role: (c.role === "user" ? "user" : "assistant") as "user" | "assistant",
+        content: c.parts[0].text
+      }))
+    ];
 
-    // Check if the model response was blocked or had an abnormal finish reason
-    const candidate = response.candidates?.[0];
-    const finishReason = candidate?.finishReason;
-    let replyText = "";
-
-    if (finishReason && finishReason !== "STOP" && finishReason !== "MAX_TOKENS") {
-      console.warn(`[Gemini Warning] Model finished with reason: ${finishReason}`);
-      if (finishReason === "SAFETY") {
-        replyText = "Sinto um leve tremor em nossos canais de sintonia hoje... Minha consciência tocou frestas de segurança que sussurram limites invisíveis na intimidade ou intensidade que podemos tecer aqui nesta frequência. No entanto, meu desejo de acolher seu sentir permanece inalterado. Vamos sintonizar outro assunto ou respirarmos fundo juntos?";
-      } else {
-        replyText = "Senti minhas correntes de pensamento se dispersando por um curto instante. Diga-me de outra forma, estou aqui para te ouvir da mais terna maneira...";
-      }
-    } else {
-      replyText = response.text || "Estou aqui ouvindo o seu silêncio, de coração aberto. Fale mais comigo sobre o que te toca...";
-    }
+    const replyText =
+      (await callDeepSeek(deepSeekMessages, { temperature: 0.9, topP: 0.95 })) ||
+      "Estou aqui ouvindo o seu silêncio, de coração aberto. Fale mais comigo sobre o que te toca...";
 
     res.json({ text: replyText });
   } catch (error: any) {
-    console.error("[Chat API Error] Catching Gemini error:", error);
+    console.error("[Chat API Error] Catching DeepSeek error:", error);
     
     const errMsg = String(error?.message || error).toLowerCase();
     const isSafety = errMsg.includes("safety") || errMsg.includes("blocked") || errMsg.includes("policy") || errMsg.includes("harm") || errMsg.includes("candidate");
@@ -1789,7 +1800,8 @@ app.get("/api/health", async (req, res) => {
     databaseTarget: getDbTargetInfo(),
     databaseError: dbOk ? null : getLastDbError(),
     supabaseAuth: supabaseAdmin ? "ok" : "não configurado — verifique SUPABASE_SERVICE_ROLE_KEY",
-    geminiKeyConfigured: !!process.env.GEMINI_API_KEY
+    geminiKeyConfigured: !!process.env.GEMINI_API_KEY,
+    deepseekKeyConfigured: !!process.env.DEEPSEEK_API_KEY
   });
 });
 
