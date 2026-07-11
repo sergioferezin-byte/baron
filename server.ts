@@ -1,7 +1,6 @@
 import express from "express";
 import path from "path";
 import crypto from "crypto";
-import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 import fs from "fs";
@@ -2375,6 +2374,9 @@ async function bootstrapServer() {
 
   if (process.env.NODE_ENV !== "production") {
     console.log("Starting server in DEVELOPMENT mode...");
+    // Dynamic import: vite is a devDependency and must not be bundled
+    // into production/serverless builds.
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -2394,4 +2396,11 @@ async function bootstrapServer() {
   });
 }
 
-bootstrapServer();
+// On Vercel the app runs as a serverless function (see api/index.ts):
+// static files are served by Vercel itself and there is no long-lived
+// listener, so skip Vite middleware / app.listen entirely.
+if (!process.env.VERCEL) {
+  bootstrapServer();
+}
+
+export default app;
