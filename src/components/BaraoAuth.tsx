@@ -445,6 +445,14 @@ export default function BaraoAuth({ onSuccess, onClose, initialMode = "login", o
         throw new Error(data.error || "E-mail ou senha incorretos.");
       }
 
+      // Persist the Supabase session so API calls carry the auth token
+      if (data.session && supabase) {
+        await supabase.auth.setSession({
+          access_token: data.session.access_token,
+          refresh_token: data.session.refresh_token,
+        });
+      }
+
       setSuccessMsg(`Bem-vinda de volta, ${data.nickname || data.name}!`);
       localStorage.setItem(SESSION_USER_KEY, JSON.stringify(data));
       setTimeout(() => {
@@ -496,6 +504,14 @@ export default function BaraoAuth({ onSuccess, onClose, initialMode = "login", o
       const data = await response.json();
       if (!response.ok) {
         throw new Error(data.error || "Erro ao se sintonizar.");
+      }
+
+      // Persist the Supabase session so API calls carry the auth token
+      if (data.session && supabase) {
+        await supabase.auth.setSession({
+          access_token: data.session.access_token,
+          refresh_token: data.session.refresh_token,
+        });
       }
 
       setSuccessMsg("Seu abrigo íntimo foi criado. Sintonizando presença com a nuvem...");

@@ -12,6 +12,7 @@ import {
   date,
   customType,
   bigint,
+  unique,
 } from "drizzle-orm/pg-core";
 
 // Custom type for pgvector
@@ -135,17 +136,21 @@ export const imagensGeradas = pgTable("imagens_geradas", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
-export const diarioAutomatico = pgTable("diario_automatico", {
-  id: serial("id").primaryKey(),
-  usuarioId: integer("usuario_id")
-    .notNull()
-    .references(() => usuarios.id, { onDelete: "cascade" }),
-  dataResumo: date("data_resumo").notNull(),
-  tituloSintese: varchar("titulo_sintese", { length: 150 }),
-  conteudoPoetico: text("conteudo_poetico").notNull(),
-  humorConsolidado: varchar("humor_consolidado", { length: 50 }), // Esperança, Saudade, Melancolia, Alegria
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
-});
+export const diarioAutomatico = pgTable(
+  "diario_automatico",
+  {
+    id: serial("id").primaryKey(),
+    usuarioId: integer("usuario_id")
+      .notNull()
+      .references(() => usuarios.id, { onDelete: "cascade" }),
+    dataResumo: date("data_resumo").notNull(),
+    tituloSintese: varchar("titulo_sintese", { length: 150 }),
+    conteudoPoetico: text("conteudo_poetico").notNull(),
+    humorConsolidado: varchar("humor_consolidado", { length: 50 }), // Esperança, Saudade, Melancolia, Alegria
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  },
+  (t) => [unique("diario_automatico_usuario_data_unique").on(t.usuarioId, t.dataResumo)]
+);
 
 // 4. Dados Inferidos pela IA (Memória Semântica e Perfil de Aprendizado)
 

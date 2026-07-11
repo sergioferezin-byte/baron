@@ -137,19 +137,9 @@ export default function App() {
           localStorage.setItem(SESSION_USER_KEY, JSON.stringify(matchedUser));
         }
       } else {
+        // The Supabase client persists and refreshes the session on its own;
+        // never keep or replay plaintext passwords from localStorage.
         console.log("[Supabase Auth State] Desconectado.");
-        // If there is a stored local user with email & password, log back in silently
-        if (currentUser && currentUser.email && currentUser.password && currentUser.password !== "google_oauth_provider") {
-          try {
-            console.log("[Supabase Auth State] Reconectando usuário local de forma silenciosa para sincronismo...");
-            await supabase.auth.signInWithPassword({
-              email: currentUser.email,
-              password: currentUser.password
-            });
-          } catch (syncErr) {
-            console.log("[Supabase Sync Sign-In Info] Silently managed credentials pending setup:", syncErr);
-          }
-        }
       }
     });
     

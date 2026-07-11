@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
@@ -17,8 +18,9 @@ if (!process.env.SUPABASE_SERVICE_ROLE_KEY && process.env.VITE_SUPABASE_ANON_KEY
 }
 console.log("====================================");
 
-import { db } from "./src/db/index.ts";
-import { supabaseAdmin } from "./src/lib/supabase-admin.ts";
+import { db, checkDbConnection } from "./src/db/index.ts";
+import { supabaseAdmin, createSupabaseAuthClient } from "./src/lib/supabase-admin.ts";
+import { requireAuth, ownsUid, AuthRequest } from "./src/middleware/auth.ts";
 import { 
   usuarios, 
   perfisEditaveis, 
@@ -1573,6 +1575,79 @@ async function resolveUserIdByUid(uid: string): Promise<number | null> {
   return user.length > 0 ? user[0].id : null;
 }
 
+// ===== Password hashing (scrypt) — used only when Supabase Auth is unavailable =====
+function hashPassword(password: string): string {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const hash = crypto.scryptSync(password, salt, 64).toString("hex");
+  return `scrypt:${salt}:${hash}`;
+}
+
+function verifyPassword(password: string, stored: string | null | undefined): boolean {
+  if (!stored) return false;
+  if (stored.startsWith("scrypt:")) {
+    const [, salt, hash] = stored.split(":");
+    if (!salt || !hash) return false;
+    const candidate = crypto.scryptSync(password, salt, 64);
+    const expected = Buffer.from(hash, "hex");
+    return candidate.length === expected.length && crypto.timingSafeEqual(candidate, expected);
+  }
+  // Legacy rows stored the password in plaintext
+  return stored === password;
+}
+
+// ===== Shared auth helpers =====
+async function ensureProfileAndWallet(usuarioId: number, preferredSound?: string, plan?: string) {
+  const [existingProfile] = await db.select().from(perfisEditaveis).where(eq(perfisEditaveis.usuarioId, usuarioId)).limit(1);
+  if (!existingProfile) {
+    await db.insert(perfisEditaveis).values({
+      usuarioId,
+      fatosBiografia: JSON.stringify({ preferredSound: preferredSound || "chuva", plan: plan || "free" })
+    });
+  }
+  const [existingWallet] = await db.select().from(carteirasCreditos).where(eq(carteirasCreditos.usuarioId, usuarioId)).limit(1);
+  if (!existingWallet) {
+    await db.insert(carteirasCreditos).values({
+      usuarioId,
+      tokensDisponiveis: 100
+    });
+  }
+}
+
+async function buildUserResponse(user: typeof usuarios.$inferSelect, session?: { access_token: string; refresh_token: string } | null) {
+  const [profile] = await db.select().from(perfisEditaveis).where(eq(perfisEditaveis.usuarioId, user.id)).limit(1);
+  const [wallet] = await db.select().from(carteirasCreditos).where(eq(carteirasCreditos.usuarioId, user.id)).limit(1);
+
+  let parsedBio: any = {};
+  if (profile?.fatosBiografia) {
+    try {
+      parsedBio = JSON.parse(profile.fatosBiografia);
+    } catch {
+      parsedBio = {};
+    }
+  }
+
+  return {
+    id: user.uid,
+    dbId: user.id,
+    email: user.email,
+    name: user.nomeCompleto,
+    nickname: user.apelido,
+    preferredSound: parsedBio.preferredSound || "chuva",
+    plan: parsedBio.plan || "free",
+    tokens: wallet?.tokensDisponiveis || 100,
+    createdAt: user.createdAt,
+    session: session ? { access_token: session.access_token, refresh_token: session.refresh_token } : null
+  };
+}
+
+/** Signs the user into Supabase Auth to hand a session (JWT) to the frontend. */
+async function signInSupabase(email: string, password: string) {
+  const authClient = createSupabaseAuthClient();
+  if (!authClient) return { session: null, user: null, error: new Error("Supabase não configurado") };
+  const { data, error } = await authClient.auth.signInWithPassword({ email, password });
+  return { session: data?.session ?? null, user: data?.user ?? null, error };
+}
+
 // Seed personas on startup helper
 async function seedPersonasIfEmpty() {
   try {
@@ -1628,143 +1703,81 @@ async function seedPersonasIfEmpty() {
 app.post("/api/auth/register", async (req, res) => {
   try {
     const { email, password, name, nickname, preferredSound, plan } = req.body;
-    if (!email || !name) {
-      return res.status(400).json({ error: "E-mail e nome são obrigatórios" });
+    if (!email || !name || !password) {
+      return res.status(400).json({ error: "E-mail, nome e senha são obrigatórios" });
+    }
+    if (String(password).length < 6) {
+      return res.status(400).json({ error: "A senha precisa ter pelo menos 6 caracteres." });
     }
 
-    const uid = "usr-" + Math.random().toString(36).substr(2, 9);
-    
-    // Insert user
-    const [newUser] = await db.insert(usuarios).values({
-      uid,
-      email: email.toLowerCase(),
-      password: password || "",
-      nomeCompleto: name,
-      apelido: nickname || name.split(" ")[0],
-    }).returning();
+    const normalizedEmail = String(email).toLowerCase();
 
-    // Sync to Supabase Auth and Supabase 'usuarios' table if available
+    // Reject duplicates upfront with a clear message
+    const [existing] = await db.select().from(usuarios).where(eq(usuarios.email, normalizedEmail)).limit(1);
+    if (existing) {
+      return res.status(409).json({ error: "Este e-mail já está cadastrado. Faça login para entrar no abrigo." });
+    }
+
+    let uid: string;
+    let session: { access_token: string; refresh_token: string } | null = null;
+
     if (supabaseAdmin) {
-      try {
-        console.log("[Supabase Sync] Syncing registration...");
-        let sbUser: any = null;
-        let sbErr: any = null;
+      // 1. Create the account in Supabase Auth FIRST. If this fails, the whole
+      //    registration fails — no more silent local-only users.
+      const { data: created, error: createErr } = await supabaseAdmin.auth.admin.createUser({
+        email: normalizedEmail,
+        password,
+        email_confirm: true,
+        user_metadata: { name, nickname }
+      });
 
-        // 1. Try direct admin.createUser first to guarantee immediate email auto-confirmation!
-        try {
-          console.log("[Supabase Sync] Attempting admin.createUser directly for auto-confirmation...");
-          const { data, error } = await supabaseAdmin.auth.admin.createUser({
-            email: email.toLowerCase(),
-            password: password || "temp_pass_123",
-            email_confirm: true,
-            user_metadata: { name, nickname }
-          });
-          if (data?.user) {
-            sbUser = data;
-            console.log("[Supabase Sync] Successfully created and auto-confirmed user via admin.createUser");
-          } else if (error) {
-            sbErr = error;
-          }
-        } catch (err: any) {
-          sbErr = err;
-        }
-
-        // 2. Fallback to standard signUp only if admin.createUser was unauthorized or failed
-        if (!sbUser?.user) {
-          console.log("[Supabase Sync] Direct admin.createUser did not return a user. Attempting standard signUp as fallback...", sbErr?.message || sbErr);
-          try {
-            const { data, error } = await supabaseAdmin.auth.signUp({
-              email: email.toLowerCase(),
-              password: password || "temp_pass_123",
-              options: {
-                data: { name, nickname }
-              }
-            });
-            if (data?.user) {
-              sbUser = data;
-              sbErr = null;
-            } else if (error) {
-              sbErr = error;
-            }
-          } catch (err: any) {
-            sbErr = err;
-          }
-        }
-
-        let syncUid = newUser.uid;
-        if (sbUser?.user) {
-          syncUid = sbUser.user.id;
-          console.log("[Supabase Sync] Successfully registered/created user in Supabase Auth, UUID:", syncUid);
-          // Update local DB user UID to match the Supabase Auth UUID
-          await db.update(usuarios).set({ uid: syncUid }).where(eq(usuarios.id, newUser.id));
-          newUser.uid = syncUid;
-        } else if (sbErr) {
-          console.log("[Supabase Sync Info] Registration completed locally. Cloud synchronization details are being set up.");
-          
-          // Check if user is already in our table, or try to search in Supabase Auth if admin listUsers is authorized
-          try {
-            const { data: existingUsers, error: searchErr } = await supabaseAdmin.auth.admin.listUsers();
-            if (!searchErr && existingUsers?.users) {
-              const match = existingUsers.users.find(u => (u as any).email?.toLowerCase() === email.toLowerCase());
-              if (match) {
-                syncUid = match.id;
-                await db.update(usuarios).set({ uid: syncUid }).where(eq(usuarios.id, newUser.id));
-                newUser.uid = syncUid;
-                console.log("[Supabase Sync] Aligned with existing Supabase Auth UUID:", syncUid);
-              }
-            }
-          } catch (listErr) {
-            console.log("[Supabase Sync] admin.listUsers was unauthorized, seeking existing local records instead.");
-          }
-        }
-
-        // Upsert into Supabase 'usuarios' table
-        const { error: dbErr } = await supabaseAdmin
-          .from("usuarios")
-          .upsert({
-            uid: syncUid,
-            email: email.toLowerCase(),
-            nome_completo: name,
-            apelido: nickname || name.split(" ")[0],
-            updated_at: new Date().toISOString()
-          }, { onConflict: "uid" });
-
-        if (dbErr) {
-          console.log("[Supabase Sync Info] Local table upsert complete. Cloud schema notice handled.");
-        } else {
-          console.log("[Supabase Sync] Successfully upserted into 'usuarios' table!");
-        }
-      } catch (sbErr: any) {
-        console.log("[Supabase Sync Info] External registration status:", sbErr.message || sbErr);
+      if (createErr || !created?.user) {
+        console.error("[Auth Register] Supabase Auth createUser falhou:", createErr?.message || createErr);
+        const alreadyExists = /already|registered|exists/i.test(createErr?.message || "");
+        return res.status(alreadyExists ? 409 : 502).json({
+          error: alreadyExists
+            ? "Este e-mail já está cadastrado na autenticação. Faça login para entrar."
+            : "Não foi possível criar sua conta na autenticação. Tente novamente em instantes."
+        });
       }
+
+      uid = created.user.id;
+
+      // 2. Sign in to hand the session (JWT) to the frontend
+      const signIn = await signInSupabase(normalizedEmail, password);
+      session = signIn.session;
+      if (!session) {
+        console.warn("[Auth Register] Usuário criado no Auth, mas signIn não retornou sessão:", signIn.error?.message);
+      }
+    } else {
+      // Local/dev mode without Supabase: store a scrypt hash, never plaintext
+      uid = "usr-" + crypto.randomUUID();
     }
 
-    // Create editable profile
-    await db.insert(perfisEditaveis).values({
-      usuarioId: newUser.id,
-      fatosBiografia: JSON.stringify({ preferredSound, plan: plan || "free" })
-    });
+    // 3. Insert the profile row using the Auth UUID as uid
+    let newUser: typeof usuarios.$inferSelect;
+    try {
+      [newUser] = await db.insert(usuarios).values({
+        uid,
+        email: normalizedEmail,
+        password: supabaseAdmin ? null : hashPassword(password),
+        nomeCompleto: name,
+        apelido: nickname || name.split(" ")[0],
+      }).returning();
+    } catch (dbErr) {
+      // Avoid orphan Auth accounts if the local insert fails
+      if (supabaseAdmin) {
+        await supabaseAdmin.auth.admin.deleteUser(uid).catch(() => {});
+      }
+      throw dbErr;
+    }
 
-    // Create wallet with credits
-    await db.insert(carteirasCreditos).values({
-      usuarioId: newUser.id,
-      tokensDisponiveis: 100
-    });
+    await ensureProfileAndWallet(newUser.id, preferredSound, plan);
 
-    res.json({
-      id: newUser.uid,
-      dbId: newUser.id,
-      email: newUser.email,
-      name: newUser.nomeCompleto,
-      nickname: newUser.apelido,
-      preferredSound,
-      plan: plan || "free",
-      tokens: 100,
-      createdAt: newUser.createdAt
-    });
+    res.json(await buildUserResponse(newUser, session));
   } catch (error: any) {
     console.error("[Auth Register] Failed:", error);
-    res.status(500).json({ error: "Falha ao registrar usuário. Esse e-mail já pode estar em uso." });
+    res.status(500).json({ error: "Falha ao registrar usuário. Tente novamente." });
   }
 });
 
@@ -1817,44 +1830,77 @@ app.get("/api/auth/test-supabase", async (req, res) => {
 app.post("/api/auth/login", async (req, res) => {
   try {
     const { email, password } = req.body;
-    if (!email) {
-      return res.status(400).json({ error: "E-mail é obrigatório" });
+    if (!email || !password) {
+      return res.status(400).json({ error: "E-mail e senha são obrigatórios" });
     }
 
-    const [user] = await db.select().from(usuarios).where(eq(usuarios.email, email.toLowerCase())).limit(1);
-    if (!user) {
-      return res.status(404).json({ error: "Usuário não encontrado" });
-    }
+    const normalizedEmail = String(email).toLowerCase();
+    let [user] = await db.select().from(usuarios).where(eq(usuarios.email, normalizedEmail)).limit(1);
+    let session: { access_token: string; refresh_token: string } | null = null;
 
-    // Direct login without strict email confirmation, standard passwords
-    if (password && user.password && user.password !== password) {
-      return res.status(401).json({ error: "Senha incorreta" });
-    }
+    if (supabaseAdmin) {
+      // Primary path: Supabase Auth validates the credentials
+      const signIn = await signInSupabase(normalizedEmail, password);
 
-    // Get profile properties
-    const [profile] = await db.select().from(perfisEditaveis).where(eq(perfisEditaveis.usuarioId, user.id)).limit(1);
-    const [wallet] = await db.select().from(carteirasCreditos).where(eq(carteirasCreditos.usuarioId, user.id)).limit(1);
+      if (signIn.session && signIn.user) {
+        session = signIn.session;
 
-    let parsedBio: any = {};
-    if (profile?.fatosBiografia) {
-      try {
-        parsedBio = JSON.parse(profile.fatosBiografia);
-      } catch {
-        parsedBio = {};
+        // Ensure the local row exists and carries the Auth UUID
+        if (!user) {
+          [user] = await db.insert(usuarios).values({
+            uid: signIn.user.id,
+            email: normalizedEmail,
+            nomeCompleto: signIn.user.user_metadata?.name || normalizedEmail.split("@")[0],
+            apelido: signIn.user.user_metadata?.nickname || normalizedEmail.split("@")[0],
+          }).returning();
+        } else if (user.uid !== signIn.user.id) {
+          await db.update(usuarios).set({ uid: signIn.user.id, updatedAt: new Date() }).where(eq(usuarios.id, user.id));
+          user.uid = signIn.user.id;
+        }
+
+        // Auth is now the source of truth — drop any stored password
+        if (user.password) {
+          await db.update(usuarios).set({ password: null }).where(eq(usuarios.id, user.id));
+        }
+      } else {
+        // Legacy migration: user existed only locally (plaintext/scrypt password).
+        // If the local password matches, create the Supabase Auth account now.
+        if (user && verifyPassword(password, user.password)) {
+          console.log("[Auth Login] Migrando usuário legado para o Supabase Auth:", normalizedEmail);
+          const { data: created, error: createErr } = await supabaseAdmin.auth.admin.createUser({
+            email: normalizedEmail,
+            password,
+            email_confirm: true,
+            user_metadata: { name: user.nomeCompleto, nickname: user.apelido }
+          });
+
+          if (created?.user) {
+            await db.update(usuarios).set({ uid: created.user.id, password: null, updatedAt: new Date() }).where(eq(usuarios.id, user.id));
+            user.uid = created.user.id;
+            const retry = await signInSupabase(normalizedEmail, password);
+            session = retry.session;
+          } else {
+            // Account exists in Auth with a different password, or Auth is unreachable
+            console.error("[Auth Login] Falha ao migrar usuário legado:", createErr?.message || createErr);
+            return res.status(401).json({ error: "E-mail ou senha incorretos." });
+          }
+        } else {
+          return res.status(401).json({ error: "E-mail ou senha incorretos." });
+        }
+      }
+    } else {
+      // Local/dev mode without Supabase
+      if (!user || !verifyPassword(password, user.password)) {
+        return res.status(401).json({ error: "E-mail ou senha incorretos." });
+      }
+      // Upgrade legacy plaintext to scrypt on successful login
+      if (user.password && !user.password.startsWith("scrypt:")) {
+        await db.update(usuarios).set({ password: hashPassword(password) }).where(eq(usuarios.id, user.id));
       }
     }
 
-    res.json({
-      id: user.uid,
-      dbId: user.id,
-      email: user.email,
-      name: user.nomeCompleto,
-      nickname: user.apelido,
-      preferredSound: parsedBio.preferredSound || "chuva",
-      plan: parsedBio.plan || "free",
-      tokens: wallet?.tokensDisponiveis || 100,
-      createdAt: user.createdAt
-    });
+    await ensureProfileAndWallet(user.id);
+    res.json(await buildUserResponse(user, session));
   } catch (error: any) {
     console.error("[Auth Login] Failed:", error);
     res.status(500).json({ error: "Falha no servidor durante login." });
@@ -1868,187 +1914,76 @@ app.post("/api/auth/google-sync", async (req, res) => {
       return res.status(400).json({ error: "E-mail do Google é obrigatório" });
     }
 
-    const resolvedUid = uid || "usr-" + Math.random().toString(36).substr(2, 9);
+    const normalizedEmail = String(email).toLowerCase();
     const nickname = name ? name.split(" ")[0] + " Querida" : "Querida";
 
-    // Insert or update onConflict email
+    // Resolve the Supabase Auth UUID first (create the Auth account if needed)
+    let resolvedUid = uid || null;
+    if (supabaseAdmin && !resolvedUid) {
+      const { data: created, error: createErr } = await supabaseAdmin.auth.admin.createUser({
+        email: normalizedEmail,
+        email_confirm: true,
+        user_metadata: { name: name || "Convidada Google", nickname }
+      });
+
+      if (created?.user) {
+        resolvedUid = created.user.id;
+        console.log("[Google Sync] Usuária criada no Supabase Auth, UUID:", resolvedUid);
+      } else if (/already|registered|exists/i.test(createErr?.message || "")) {
+        // Account already exists in Auth — locate its UUID
+        const { data: existingUsers } = await supabaseAdmin.auth.admin.listUsers();
+        const match = existingUsers?.users?.find(u => (u as any).email?.toLowerCase() === normalizedEmail);
+        if (match) {
+          resolvedUid = match.id;
+          console.log("[Google Sync] Usuária já existia no Supabase Auth, UUID:", resolvedUid);
+        }
+      } else if (createErr) {
+        console.error("[Google Sync] Falha ao criar usuária no Supabase Auth:", createErr.message);
+      }
+    }
+    const uidIsAuthoritative = !!resolvedUid; // came from the client or from Supabase Auth
+    if (!resolvedUid) {
+      resolvedUid = "usr-" + crypto.randomUUID();
+    }
+
+    // Insert or update local row keyed by email. Only overwrite an existing uid
+    // when we actually resolved the authoritative Supabase Auth UUID.
     const [user] = await db.insert(usuarios).values({
       uid: resolvedUid,
-      email: email.toLowerCase(),
+      email: normalizedEmail,
       nomeCompleto: name || "Convidada Google",
       apelido: nickname,
-      password: "google_oauth_provider"
+      password: null
     }).onConflictDoUpdate({
       target: usuarios.email,
       set: {
+        ...(uidIsAuthoritative ? { uid: resolvedUid } : {}),
         nomeCompleto: name || "Convidada Google",
         updatedAt: new Date()
       }
     }).returning();
 
-    // Sync to Supabase Auth and Supabase 'usuarios' table if available
-    if (supabaseAdmin) {
-      try {
-        console.log("[Supabase Sync Google] Syncing Google Auth user...");
-        
-        let syncUid = user.uid;
-        let foundInAuth = false;
-
-        // 1. Try to find the user in our Supabase table first (works with standard key)
-        try {
-          const { data: sbProfile } = await supabaseAdmin
-            .from("usuarios")
-            .select("uid")
-            .eq("email", email.toLowerCase())
-            .maybeSingle();
-
-          if (sbProfile?.uid) {
-            syncUid = sbProfile.uid;
-            foundInAuth = true;
-            console.log("[Supabase Sync Google] Found existing user in Supabase 'usuarios' table, UUID:", syncUid);
-          }
-        } catch (dbErr) {
-          console.log("[Supabase Sync Google] Could not read from 'usuarios' table during lookup, proceeding with register flow.");
-        }
-
-        // 2. Try listUsers if authorized
-        if (!foundInAuth) {
-          try {
-            const { data: existingUsers, error: searchErr } = await supabaseAdmin.auth.admin.listUsers();
-            if (!searchErr && existingUsers?.users) {
-              const match = existingUsers.users.find(u => (u as any).email?.toLowerCase() === email.toLowerCase());
-              if (match) {
-                syncUid = match.id;
-                foundInAuth = true;
-                console.log("[Supabase Sync Google] Found user in Supabase Auth via listUsers, UUID:", syncUid);
-              }
-            }
-          } catch (listErr) {
-            console.log("[Supabase Sync Google] listUsers was unauthorized (standard key is active), proceeding with signUp.");
-          }
-        }
-
-        // 3. Try direct admin.createUser first to guarantee immediate auto-confirmation!
-        if (!foundInAuth) {
-          try {
-            console.log("[Supabase Sync Google] Attempting admin.createUser directly for auto-confirmation...");
-            const { data: sbUser, error: sbErr } = await supabaseAdmin.auth.admin.createUser({
-              email: email.toLowerCase(),
-              email_confirm: true,
-              user_metadata: { name: name || "Convidada Google", nickname: nickname }
-            });
-            if (sbUser?.user) {
-               syncUid = sbUser.user.id;
-               foundInAuth = true;
-               console.log("[Supabase Sync Google] Created user in Supabase Auth via admin, UUID:", syncUid);
-             } else if (sbErr) {
-               console.log("[Supabase Sync Google Info] admin.createUser state:", sbErr.message);
-             }
-           } catch (adminErr) {
-             console.log("[Supabase Sync Google Info] admin.createUser exception details:", adminErr);
-           }
-         }
- 
-         // 4. Fallback to standard signUp only if admin.createUser was unauthorized or failed
-         if (!foundInAuth) {
-           try {
-             console.log("[Supabase Sync Google] admin.createUser failed or was unauthorized. Attempting standard signUp as fallback...");
-             const { data: sbUser, error: sbErr } = await supabaseAdmin.auth.signUp({
-               email: email.toLowerCase(),
-               password: Math.random().toString(36).substring(2, 15) + "Pass1!",
-               options: {
-                 data: { name: name || "Convidada Google", nickname: nickname }
-               }
-             });
-             if (sbUser?.user) {
-               syncUid = sbUser.user.id;
-               foundInAuth = true;
-               console.log("[Supabase Sync Google] Successfully registered Google user via standard signUp, UUID:", syncUid);
-             } else if (sbErr) {
-               console.log("[Supabase Sync Google Info] Standard signUp state:", sbErr.message);
-             }
-           } catch (signUpErr) {
-             console.log("[Supabase Sync Google Info] Standard signUp exception details:", signUpErr);
-           }
-         }
-
-        // Align local user uid with Supabase UUID if different
-        if (syncUid !== user.uid) {
-          await db.update(usuarios).set({ uid: syncUid }).where(eq(usuarios.id, user.id));
-          user.uid = syncUid;
-        }
-
-        // Upsert into Supabase 'usuarios' table
-        const { error: dbErr } = await supabaseAdmin
-          .from("usuarios")
-          .upsert({
-            uid: syncUid,
-            email: email.toLowerCase(),
-            nome_completo: name || "Convidada Google",
-            apelido: nickname,
-            updated_at: new Date().toISOString()
-          }, { onConflict: "uid" });
-
-        if (dbErr) {
-          console.error("[Supabase Sync Google] Error upserting into 'usuarios' table:", dbErr.message);
-        } else {
-          console.log("[Supabase Sync Google] Successfully upserted into 'usuarios' table!");
-        }
-      } catch (sbErr) {
-        console.error("[Supabase Sync Google Exception]:", sbErr);
-      }
-    }
-
-    // Ensure profile & wallet exist
-    const [existingProfile] = await db.select().from(perfisEditaveis).where(eq(perfisEditaveis.usuarioId, user.id)).limit(1);
-    if (!existingProfile) {
-      await db.insert(perfisEditaveis).values({
-        usuarioId: user.id,
-        fatosBiografia: JSON.stringify({ preferredSound: "chuva", plan: "free" })
-      });
-    }
-
-    const [existingWallet] = await db.select().from(carteirasCreditos).where(eq(carteirasCreditos.usuarioId, user.id)).limit(1);
-    if (!existingWallet) {
-      await db.insert(carteirasCreditos).values({
-        usuarioId: user.id,
-        tokensDisponiveis: 100
-      });
-    }
-
-    const [profile] = await db.select().from(perfisEditaveis).where(eq(perfisEditaveis.usuarioId, user.id)).limit(1);
-    const [wallet] = await db.select().from(carteirasCreditos).where(eq(carteirasCreditos.usuarioId, user.id)).limit(1);
-
-    let parsedBio: any = {};
-    if (profile?.fatosBiografia) {
-      try {
-        parsedBio = JSON.parse(profile.fatosBiografia);
-      } catch {
-        parsedBio = {};
-      }
-    }
-
-    res.json({
-      id: user.uid,
-      dbId: user.id,
-      email: user.email,
-      name: user.nomeCompleto,
-      nickname: user.apelido,
-      preferredSound: parsedBio.preferredSound || "chuva",
-      plan: parsedBio.plan || "free",
-      tokens: wallet?.tokensDisponiveis || 100,
-      createdAt: user.createdAt
-    });
+    await ensureProfileAndWallet(user.id);
+    res.json(await buildUserResponse(user));
   } catch (error: any) {
     console.error("[Google Sync] Failed:", error);
     res.status(500).json({ error: "Erro ao sincronizar login do Google." });
   }
 });
 
+// Ownership helper for resources looked up by their own id
+async function userUidMatches(usuarioId: number, tokenUid: string): Promise<boolean> {
+  const [u] = await db.select({ uid: usuarios.uid }).from(usuarios).where(eq(usuarios.id, usuarioId)).limit(1);
+  return !!u && u.uid === tokenUid;
+}
+
 // 2. Profiles CRUD
-app.get("/api/profiles/:uid", async (req, res) => {
+app.get("/api/profiles/:uid", requireAuth, async (req: AuthRequest, res) => {
   try {
     const { uid } = req.params;
+    if (!ownsUid(req, uid)) {
+      return res.status(403).json({ error: "Acesso negado a este perfil." });
+    }
     const userDbId = await resolveUserIdByUid(uid);
     if (!userDbId) {
       return res.status(404).json({ error: "Usuário não sintonizado no banco de dados." });
@@ -2072,11 +2007,15 @@ app.get("/api/profiles/:uid", async (req, res) => {
   }
 });
 
-app.post("/api/profiles/:uid", async (req, res) => {
+app.post("/api/profiles/:uid", requireAuth, async (req: AuthRequest, res) => {
   try {
     const { uid } = req.params;
     const profileData = req.body;
-    
+
+    if (!ownsUid(req, uid)) {
+      return res.status(403).json({ error: "Acesso negado a este perfil." });
+    }
+
     const userDbId = await resolveUserIdByUid(uid);
     if (!userDbId) {
       return res.status(404).json({ error: "Usuário não sintonizado." });
@@ -2103,28 +2042,6 @@ app.post("/api/profiles/:uid", async (req, res) => {
       }).where(eq(usuarios.id, userDbId));
     }
 
-    // Sync to Supabase table if available
-    if (supabaseAdmin && (profileData.name || profileData.nickname)) {
-      try {
-        console.log("[Supabase Admin] Syncing profile update to Supabase 'usuarios' table for UID:", uid);
-        const { error: dbErr } = await supabaseAdmin
-          .from("usuarios")
-          .update({
-            nome_completo: profileData.name || undefined,
-            apelido: profileData.nickname || undefined,
-            updated_at: new Date().toISOString()
-          })
-          .eq("uid", uid);
-        if (dbErr) {
-          console.error("[Supabase Admin Profile Sync] Error updating 'usuarios' table:", dbErr.message);
-        } else {
-          console.log("[Supabase Admin Profile Sync] Successfully updated 'usuarios' table in Supabase.");
-        }
-      } catch (sbErr) {
-        console.error("[Supabase Admin Profile Sync] Exception during profile sync:", sbErr);
-      }
-    }
-
     res.json({ success: true });
   } catch (error) {
     console.error("[Save Profile] Failed:", error);
@@ -2133,10 +2050,13 @@ app.post("/api/profiles/:uid", async (req, res) => {
 });
 
 // 3. Conversas and Chats CRUD
-app.get("/api/chats", async (req, res) => {
+app.get("/api/chats", requireAuth, async (req: AuthRequest, res) => {
   try {
     const { uid } = req.query;
     if (!uid) return res.status(400).json({ error: "uid do usuário é necessário" });
+    if (!ownsUid(req, uid as string)) {
+      return res.status(403).json({ error: "Acesso negado às conversas deste usuário." });
+    }
 
     const userDbId = await resolveUserIdByUid(uid as string);
     if (!userDbId) return res.json([]);
@@ -2149,10 +2069,13 @@ app.get("/api/chats", async (req, res) => {
   }
 });
 
-app.post("/api/chats", async (req, res) => {
+app.post("/api/chats", requireAuth, async (req: AuthRequest, res) => {
   try {
     const { uid, personaId, title } = req.body;
     if (!uid) return res.status(400).json({ error: "uid é necessário" });
+    if (!ownsUid(req, uid)) {
+      return res.status(403).json({ error: "Acesso negado." });
+    }
 
     const userDbId = await resolveUserIdByUid(uid);
     if (!userDbId) return res.status(404).json({ error: "Usuário não cadastrado." });
@@ -2185,10 +2108,18 @@ app.post("/api/chats", async (req, res) => {
   }
 });
 
-app.delete("/api/chats/:id", async (req, res) => {
+app.delete("/api/chats/:id", requireAuth, async (req: AuthRequest, res) => {
   try {
-    const { id } = req.params;
-    await db.delete(conversas).where(eq(conversas.id, parseInt(id)));
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
+
+    const [chat] = await db.select().from(conversas).where(eq(conversas.id, id)).limit(1);
+    if (!chat) return res.status(404).json({ error: "Conversa não encontrada." });
+    if (req.user && !(await userUidMatches(chat.usuarioId, req.user.id))) {
+      return res.status(403).json({ error: "Acesso negado." });
+    }
+
+    await db.delete(conversas).where(eq(conversas.id, id));
     res.json({ success: true });
   } catch (error) {
     console.error("[Delete Chat] Failed:", error);
@@ -2197,10 +2128,18 @@ app.delete("/api/chats/:id", async (req, res) => {
 });
 
 // 4. Chat Messages CRUD
-app.get("/api/chats/:conversaId/messages", async (req, res) => {
+app.get("/api/chats/:conversaId/messages", requireAuth, async (req: AuthRequest, res) => {
   try {
-    const { conversaId } = req.params;
-    const msgList = await db.select().from(mensagens).where(eq(mensagens.conversaId, parseInt(conversaId))).orderBy(mensagens.createdAt);
+    const conversaId = Number(req.params.conversaId);
+    if (!Number.isInteger(conversaId)) return res.status(400).json({ error: "conversaId inválido" });
+
+    const [chat] = await db.select().from(conversas).where(eq(conversas.id, conversaId)).limit(1);
+    if (!chat) return res.status(404).json({ error: "Conversa não encontrada." });
+    if (req.user && !(await userUidMatches(chat.usuarioId, req.user.id))) {
+      return res.status(403).json({ error: "Acesso negado." });
+    }
+
+    const msgList = await db.select().from(mensagens).where(eq(mensagens.conversaId, conversaId)).orderBy(mensagens.createdAt);
     res.json(msgList.map(m => ({
       id: m.id,
       role: m.autor === "usuario" ? "user" : "model",
@@ -2214,20 +2153,28 @@ app.get("/api/chats/:conversaId/messages", async (req, res) => {
   }
 });
 
-app.post("/api/chats/:conversaId/messages", async (req, res) => {
+app.post("/api/chats/:conversaId/messages", requireAuth, async (req: AuthRequest, res) => {
   try {
-    const { conversaId } = req.params;
+    const conversaId = Number(req.params.conversaId);
+    if (!Number.isInteger(conversaId)) return res.status(400).json({ error: "conversaId inválido" });
     const { role, text, audioUrl } = req.body;
+    if (!text) return res.status(400).json({ error: "text é obrigatório" });
+
+    const [chat] = await db.select().from(conversas).where(eq(conversas.id, conversaId)).limit(1);
+    if (!chat) return res.status(404).json({ error: "Conversa não encontrada." });
+    if (req.user && !(await userUidMatches(chat.usuarioId, req.user.id))) {
+      return res.status(403).json({ error: "Acesso negado." });
+    }
 
     const [newMsg] = await db.insert(mensagens).values({
-      conversaId: parseInt(conversaId),
+      conversaId,
       autor: role === "user" ? "usuario" : "barao",
       conteudoTexto: text,
       audioGeradoUrl: audioUrl || null
     }).returning();
 
     // Update conversation updatedAt timestamp
-    await db.update(conversas).set({ updatedAt: new Date() }).where(eq(conversas.id, parseInt(conversaId)));
+    await db.update(conversas).set({ updatedAt: new Date() }).where(eq(conversas.id, conversaId));
 
     res.json(newMsg);
   } catch (error) {
@@ -2237,10 +2184,13 @@ app.post("/api/chats/:conversaId/messages", async (req, res) => {
 });
 
 // 5. Diary Entries CRUD
-app.get("/api/diaries", async (req, res) => {
+app.get("/api/diaries", requireAuth, async (req: AuthRequest, res) => {
   try {
     const { uid } = req.query;
     if (!uid) return res.status(400).json({ error: "uid é obrigatório" });
+    if (!ownsUid(req, uid as string)) {
+      return res.status(403).json({ error: "Acesso negado." });
+    }
 
     const userDbId = await resolveUserIdByUid(uid as string);
     if (!userDbId) return res.json([]);
@@ -2259,11 +2209,14 @@ app.get("/api/diaries", async (req, res) => {
   }
 });
 
-app.post("/api/diaries", async (req, res) => {
+app.post("/api/diaries", requireAuth, async (req: AuthRequest, res) => {
   try {
     const { uid, date, title, content, mood } = req.body;
     if (!uid || !date || !content) {
       return res.status(400).json({ error: "uid, date e content são obrigatórios" });
+    }
+    if (!ownsUid(req, uid)) {
+      return res.status(403).json({ error: "Acesso negado." });
     }
 
     const userDbId = await resolveUserIdByUid(uid);
@@ -2292,10 +2245,18 @@ app.post("/api/diaries", async (req, res) => {
   }
 });
 
-app.delete("/api/diaries/:id", async (req, res) => {
+app.delete("/api/diaries/:id", requireAuth, async (req: AuthRequest, res) => {
   try {
-    const { id } = req.params;
-    await db.delete(diarioAutomatico).where(eq(diarioAutomatico.id, parseInt(id)));
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
+
+    const [entry] = await db.select().from(diarioAutomatico).where(eq(diarioAutomatico.id, id)).limit(1);
+    if (!entry) return res.status(404).json({ error: "Página não encontrada." });
+    if (req.user && !(await userUidMatches(entry.usuarioId, req.user.id))) {
+      return res.status(403).json({ error: "Acesso negado." });
+    }
+
+    await db.delete(diarioAutomatico).where(eq(diarioAutomatico.id, id));
     res.json({ success: true });
   } catch (error) {
     console.error("[Delete Diary] Failed:", error);
@@ -2304,10 +2265,13 @@ app.delete("/api/diaries/:id", async (req, res) => {
 });
 
 // 6. Album / Histories CRUD
-app.get("/api/albums", async (req, res) => {
+app.get("/api/albums", requireAuth, async (req: AuthRequest, res) => {
   try {
     const { uid } = req.query;
     if (!uid) return res.status(400).json({ error: "uid é obrigatório" });
+    if (!ownsUid(req, uid as string)) {
+      return res.status(403).json({ error: "Acesso negado." });
+    }
 
     const userDbId = await resolveUserIdByUid(uid as string);
     if (!userDbId) return res.json([]);
@@ -2337,11 +2301,14 @@ app.get("/api/albums", async (req, res) => {
   }
 });
 
-app.post("/api/albums", async (req, res) => {
+app.post("/api/albums", requireAuth, async (req: AuthRequest, res) => {
   try {
     const { uid, title, description, story, imageUrl } = req.body;
     if (!uid || !title) {
       return res.status(400).json({ error: "uid e title são obrigatórios" });
+    }
+    if (!ownsUid(req, uid)) {
+      return res.status(403).json({ error: "Acesso negado." });
     }
 
     const userDbId = await resolveUserIdByUid(uid);
@@ -2364,10 +2331,18 @@ app.post("/api/albums", async (req, res) => {
   }
 });
 
-app.delete("/api/albums/:id", async (req, res) => {
+app.delete("/api/albums/:id", requireAuth, async (req: AuthRequest, res) => {
   try {
-    const { id } = req.params;
-    await db.delete(albumEmocional).where(eq(albumEmocional.id, parseInt(id)));
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
+
+    const [entry] = await db.select().from(albumEmocional).where(eq(albumEmocional.id, id)).limit(1);
+    if (!entry) return res.status(404).json({ error: "Momento não encontrado." });
+    if (req.user && !(await userUidMatches(entry.usuarioId, req.user.id))) {
+      return res.status(403).json({ error: "Acesso negado." });
+    }
+
+    await db.delete(albumEmocional).where(eq(albumEmocional.id, id));
     res.json({ success: true });
   } catch (error) {
     console.error("[Delete Album] Failed:", error);
@@ -2377,8 +2352,12 @@ app.delete("/api/albums/:id", async (req, res) => {
 
 // Setup Vite middleware / serve static assets
 async function bootstrapServer() {
+  // Verify DB connectivity upfront so misconfiguration surfaces immediately
+  const dbOk = await checkDbConnection();
   // Seed default personas if empty on start
-  await seedPersonasIfEmpty();
+  if (dbOk) {
+    await seedPersonasIfEmpty();
+  }
   // Global Maintenance Mode check
   app.get("*", (req, res, next) => {
     const isApiRequest = req.path.startsWith("/api");
