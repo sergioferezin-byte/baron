@@ -58,42 +58,102 @@ export async function syncUserProfile(user: User, localProfileDetails?: any) {
 }
 
 /**
- * Sync diary entries with backend 'diario_automatico' table
+ * Format a "YYYY-MM-DD" key as a readable pt-BR date ("11 de julho de 2026").
+ */
+function formatDiaryDate(isoDate: string): string {
+  const [y, m, d] = isoDate.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString("pt-BR", {
+    day: "numeric",
+    month: "long",
+    year: "numeric"
+  });
+}
+
+interface CloudDiaryEntry {
+  id: number;
+  date: string; // "YYYY-MM-DD" (coluna data_resumo)
+  title: string | null;
+  content: string;
+  mood: string | null;
+}
+
+/**
+ * Sync diary entries with backend 'diario_automatico' table.
+ * The DB column data_resumo is a Postgres DATE, so we always send the
+ * entry id ("YYYY-MM-DD") — never the formatted display date.
  */
 export async function syncDiaryEntries(userId: string, localEntries: DiaryEntry[]): Promise<DiaryEntry[]> {
   try {
     // 1. Get existing diary entries from backend
     const res = await apiFetch(`/api/diaries?uid=${userId}`);
     if (!res.ok) throw new Error("Failed to load diaries");
-    const cloudList: DiaryEntry[] = await res.json();
+    const rawCloudList: CloudDiaryEntry[] = await res.json();
+    const cloudList = rawCloudList.map(c => ({ ...c, date: String(c.date).slice(0, 10) }));
 
-    // 2. Find any local entries that do not exist in cloud and post them to backend
+    // 2. Upload local entries that are missing or outdated in the cloud
+    //    (the backend upserts by usuario_id + data_resumo)
     for (const local of localEntries) {
-      const exists = cloudList.some(c => c.date === local.date);
-      if (!exists) {
-        await apiFetch("/api/diaries", {
+      const cloud = cloudList.find(c => c.date === local.id);
+      if (!cloud || cloud.content !== local.content) {
+        const postRes = await apiFetch("/api/diaries", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             uid: userId,
-            date: local.date,
+            date: local.id,
             title: local.summary?.join(", ") || "Entrada do Diário",
             content: local.content,
             mood: local.summary?.join(", ") || "Acolhido"
           })
         });
+        if (!postRes.ok) {
+          console.error(
+            `[BackendSync Error] Failed to save diary entry ${local.id}:`,
+            postRes.status,
+            await postRes.text().catch(() => "")
+          );
+        }
       }
     }
 
-    // 3. Fetch final updated list from backend
-    const finalRes = await apiFetch(`/api/diaries?uid=${userId}`);
-    if (finalRes.ok) {
-      return await finalRes.json();
+    // 3. Merge: local entries carry the full data (status, summary, intensity);
+    //    cloud-only days are mapped back into the DiaryEntry shape
+    const merged: DiaryEntry[] = [...localEntries];
+    for (const cloud of cloudList) {
+      if (!merged.some(l => l.id === cloud.date)) {
+        merged.push({
+          id: cloud.date,
+          date: formatDiaryDate(cloud.date),
+          content: cloud.content,
+          status: "generated",
+          summary: cloud.title ? cloud.title.split(", ") : [],
+          intensity: 0,
+          createdAt: new Date().toISOString()
+        });
+      }
     }
-    return cloudList;
+    return merged;
   } catch (error) {
     console.error("[BackendSync Error] Failed to sync diary entries:", error);
     return localEntries;
+  }
+}
+
+/**
+ * Delete a diary entry from the backend by its day key ("YYYY-MM-DD"),
+ * so a locally deleted entry does not come back on the next sync.
+ */
+export async function deleteCloudDiaryEntry(userId: string, dayId: string) {
+  try {
+    const res = await apiFetch(`/api/diaries?uid=${userId}`);
+    if (!res.ok) return;
+    const cloudList: CloudDiaryEntry[] = await res.json();
+    const target = cloudList.find(c => String(c.date).slice(0, 10) === dayId);
+    if (target) {
+      await apiFetch(`/api/diaries/${target.id}`, { method: "DELETE" });
+    }
+  } catch (error) {
+    console.error("[BackendSync Error] Failed to delete diary entry:", error);
   }
 }
 

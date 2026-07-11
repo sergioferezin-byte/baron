@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 
 import BaraoPaywall from "./BaraoPaywall";
-import { syncDiaryEntries } from "../utils/supabaseSync";
+import { syncDiaryEntries, deleteCloudDiaryEntry } from "../utils/supabaseSync";
 
 interface BaraoDiaryProps {
   currentUser: User | null;
@@ -335,8 +335,8 @@ export default function BaraoDiary({ currentUser, onPromptAuth, onUserUpdate }: 
     setDiaryEntries(updatedEntries);
     localStorage.setItem(diaryStorageKey, JSON.stringify(updatedEntries));
     if (currentUser) {
-      syncDiaryEntries(currentUser.id, updatedEntries).catch(err => {
-        console.warn("[FirebaseSync Diary Delete]: ", err);
+      deleteCloudDiaryEntry(currentUser.id, dayId).catch(err => {
+        console.warn("[BackendSync Diary Delete]: ", err);
       });
     }
     setDeleteConfirmDayId(null);
