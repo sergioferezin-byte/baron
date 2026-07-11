@@ -10,6 +10,24 @@ import { supabase } from "../lib/supabase";
 
 const SESSION_USER_KEY = "mb_logged_user";
 
+/**
+ * Parses the API response as JSON. When the backend isn't running, hosting
+ * returns an HTML/text error page — surface a readable message instead of
+ * "Unexpected token ... is not valid JSON".
+ */
+async function parseJsonResponse(response: Response): Promise<any> {
+  const raw = await response.text();
+  try {
+    return JSON.parse(raw);
+  } catch {
+    console.error("[Auth] Resposta não-JSON do servidor:", response.status, raw.slice(0, 200));
+    throw new Error(
+      `O servidor não respondeu (HTTP ${response.status}). ` +
+      "Verifique se o backend está rodando e tente novamente em instantes."
+    );
+  }
+}
+
 interface BaraoAuthProps {
   onSuccess: (user: User) => void;
   onClose?: () => void;
@@ -440,7 +458,7 @@ export default function BaraoAuth({ onSuccess, onClose, initialMode = "login", o
         body: JSON.stringify({ email, password })
       });
 
-      const data = await response.json();
+      const data = await parseJsonResponse(response);
       if (!response.ok) {
         throw new Error(data.error || "E-mail ou senha incorretos.");
       }
@@ -501,7 +519,7 @@ export default function BaraoAuth({ onSuccess, onClose, initialMode = "login", o
         })
       });
 
-      const data = await response.json();
+      const data = await parseJsonResponse(response);
       if (!response.ok) {
         throw new Error(data.error || "Erro ao se sintonizar.");
       }
