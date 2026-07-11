@@ -48,6 +48,24 @@ pool.on("error", (err) => {
   console.error("Unexpected error on idle SQL pool client:", err);
 });
 
+let lastDbError: string | null = null;
+
+export function getLastDbError(): string | null {
+  return lastDbError;
+}
+
+/** Sanitized info about the configured DATABASE_URL (never exposes the password). */
+export function getDbTargetInfo(): { host: string; port: string; protocol: string } | { error: string } | null {
+  const url = process.env.DATABASE_URL;
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    return { protocol: u.protocol.replace(":", ""), host: u.hostname, port: u.port || "5432" };
+  } catch {
+    return { error: "DATABASE_URL não é uma URL válida" };
+  }
+}
+
 // Fail fast with a readable message instead of a cryptic error on the first user request.
 export async function checkDbConnection(): Promise<boolean> {
   try {
@@ -57,10 +75,12 @@ export async function checkDbConnection(): Promise<boolean> {
     } finally {
       client.release();
     }
+    lastDbError = null;
     console.log("[DB] Conexão com o banco de dados verificada com sucesso.");
     return true;
   } catch (err: any) {
-    console.error("[DB] FALHA ao conectar no banco de dados:", err?.message || err);
+    lastDbError = [err?.code, err?.message].filter(Boolean).join(": ") || String(err);
+    console.error("[DB] FALHA ao conectar no banco de dados:", lastDbError);
     console.error(
       "[DB] Verifique DATABASE_URL (ou SQL_HOST/SQL_USER/SQL_PASSWORD/SQL_DB_NAME). " +
       "Para Supabase, use a connection string do Session Pooler com SSL."

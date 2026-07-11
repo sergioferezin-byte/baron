@@ -17,7 +17,7 @@ if (!process.env.SUPABASE_SERVICE_ROLE_KEY && process.env.VITE_SUPABASE_ANON_KEY
 }
 console.log("====================================");
 
-import { db, checkDbConnection } from "./src/db/index.ts";
+import { db, checkDbConnection, getLastDbError, getDbTargetInfo } from "./src/db/index.ts";
 import { supabaseAdmin, createSupabaseAuthClient } from "./src/lib/supabase-admin.ts";
 import { requireAuth, ownsUid, AuthRequest } from "./src/middleware/auth.ts";
 import { 
@@ -1786,6 +1786,8 @@ app.get("/api/health", async (req, res) => {
   res.status(dbOk ? 200 : 503).json({
     database: dbOk ? "ok" : "falha — verifique DATABASE_URL",
     databaseUrlConfigured: !!process.env.DATABASE_URL,
+    databaseTarget: getDbTargetInfo(),
+    databaseError: dbOk ? null : getLastDbError(),
     supabaseAuth: supabaseAdmin ? "ok" : "não configurado — verifique SUPABASE_SERVICE_ROLE_KEY",
     geminiKeyConfigured: !!process.env.GEMINI_API_KEY
   });
