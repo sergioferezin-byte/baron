@@ -169,6 +169,20 @@ export default function App() {
     return () => subscription.unsubscribe();
   }, [currentUser]);
 
+  const handleLogout = async () => {
+    // Encerra a sessão do Supabase ANTES de limpar o estado local;
+    // caso contrário o onAuthStateChange religa a usuária na hora.
+    if (supabase) {
+      try {
+        await supabase.auth.signOut();
+      } catch (err) {
+        console.error("[Logout] Falha ao encerrar sessão Supabase:", err);
+      }
+    }
+    localStorage.removeItem(SESSION_USER_KEY);
+    setCurrentUser(null);
+  };
+
   const handleUserUpdate = (updatedUser: User | null) => {
     setCurrentUser(updatedUser);
     if (updatedUser) {
@@ -313,10 +327,7 @@ export default function App() {
                   {renderAvatarSvgOrImg(userAvatar, (currentUser.nickname || currentUser.name || "U").slice(0, 1), "w-8 h-8 rounded-sm")}
                 </div>
                 <button
-                  onClick={() => {
-                    localStorage.removeItem(SESSION_USER_KEY);
-                    setCurrentUser(null);
-                  }}
+                  onClick={handleLogout}
                   className="px-2.5 py-1.5 border border-white/10 hover:border-rose-950 hover:text-red-300 transition-all duration-300 text-[9px] uppercase font-mono tracking-wider rounded-sm text-zinc-400 bg-black flex items-center gap-1.5"
                   title="Sair do Abrigo"
                 >
@@ -343,7 +354,7 @@ export default function App() {
             activeTab={activeTab}
             setActiveTab={setActiveTab}
             currentUser={currentUser}
-            setCurrentUser={setCurrentUser}
+            onLogout={handleLogout}
             onSintonizar={() => {
               setAuthInitialMode("login");
               setShowAuthModal(true);
