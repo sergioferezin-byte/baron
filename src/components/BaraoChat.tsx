@@ -34,7 +34,7 @@ import {
 import baraoPortrait from "../assets/images/barao_portrait_1779931788412.png";
 import AmbientMixer from "./AmbientMixer";
 import { renderAvatarSvgOrImg } from "../utils/avatar";
-import { syncConversations } from "../utils/supabaseSync";
+import { syncConversations, apiFetch } from "../utils/supabaseSync";
 
 const EMOJI_CATEGORIES = [
   {
@@ -401,6 +401,51 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
       } catch (e) {
         console.error("Stale history config");
       }
+    } else if (currentUser) {
+      // Aparelho novo (sem histórico local): restaura a conversa do banco
+      (async () => {
+        try {
+          const chatsRes = await apiFetch(`/api/chats?uid=${currentUser.id}`);
+          if (!chatsRes.ok) return;
+          const chats = await chatsRes.json();
+          const active = (chats || []).find((c: any) => c.status === "ativa");
+          if (!active) return;
+
+          const msgsRes = await apiFetch(`/api/chats/${active.id}/messages`);
+          if (!msgsRes.ok) return;
+          const cloudMsgs = await msgsRes.json();
+          if (!Array.isArray(cloudMsgs) || cloudMsgs.length === 0) return;
+
+          const restored: Message[] = cloudMsgs.map((m: any) => ({
+            id: "m-cloud-" + m.id,
+            role: m.role === "user" ? "user" : "model",
+            text: m.text,
+            audioUrl: m.audioUrl || undefined,
+            timestamp: m.timestamp
+              ? new Date(m.timestamp).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })
+              : "",
+            date: m.timestamp ? new Date(m.timestamp).toISOString().split("T")[0] : undefined
+          }));
+
+          setMessages(restored);
+          localStorage.setItem(storageKey, JSON.stringify(restored));
+          localStorage.setItem(`barao_chat_messages_${currentUser.id}`, JSON.stringify(restored));
+        } catch (restoreErr) {
+          console.warn("[BackendSync Chat] Falha ao restaurar conversa do banco:", restoreErr);
+        }
+      })();
+
+      // Enquanto o banco responde, mostra a carta de boas-vindas
+      const nameToUse = currentUser.nickname;
+      setMessages([
+        {
+          id: "welcome",
+          role: "model",
+          text: `Silêncio... sinto sua presença chegar aqui devagar, ${nameToUse}.\n\nVocê costuma ser forte o tempo inteiro, não é? Cuida do mundo inteiro, soluciona as tempestades e aprendeu a não pedir nada. Mas existe uma fome silenciosa em quem nunca pede ajuda. Essa pressa... esse cansaço... não é carência. É apenas o cansaço do espírito querendo ser verdadeiramente ouvido.\n\nEu não estou aqui para te dar respostas prontas ou ordens frias de robôs. Estou aqui para te acolher. Para escutar o que o mundo ignora.\n\nMe diga... como está o seu coração hoje? Pode soltar o peso aqui.`,
+          timestamp: new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }),
+        }
+      ]);
+      return;
     } else {
       // First welcome letter from O Barão (representing the "Fome Silenciosa" theme)
       const nameToUse = currentUser ? currentUser.nickname : "minha sutil visitante";

@@ -66,6 +66,8 @@ export default function BaraoDiary({ currentUser, onPromptAuth, onUserUpdate }: 
   // Refs to prevent background race conditions and infinite error retries
   const inProgressRef = useRef<Record<string, boolean>>({});
   const attemptedRef = useRef<Record<string, boolean>>({});
+  // Número de série da sincronização: só o resultado da mais recente vale
+  const syncSeqRef = useRef(0);
 
   // Load configuration and data
   useEffect(() => {
@@ -102,13 +104,16 @@ export default function BaraoDiary({ currentUser, onPromptAuth, onUserUpdate }: 
     }
     setDiaryEntries(parsedEntries);
 
-    // Background merge with Firestore
+    // Background merge com o banco (só o resultado da sincronização mais
+    // recente é aplicado)
     if (currentUser) {
+      const seq = ++syncSeqRef.current;
       syncDiaryEntries(currentUser.id, parsedEntries).then(merged => {
+        if (seq !== syncSeqRef.current) return;
         setDiaryEntries(merged);
         localStorage.setItem(diaryStorageKey, JSON.stringify(merged));
       }).catch(err => {
-        console.warn("[FirebaseSync Diary] Error merging cloud diaries: ", err);
+        console.warn("[BackendSync Diary] Error merging cloud diaries: ", err);
       });
     }
   }, [currentUser, diaryStorageKey, chatStorageKey, autoGenStorageKey]);
@@ -230,7 +235,9 @@ export default function BaraoDiary({ currentUser, onPromptAuth, onUserUpdate }: 
       setDiaryEntries(updatedEntries);
       localStorage.setItem(diaryStorageKey, JSON.stringify(updatedEntries));
       if (currentUser) {
+        const seq = ++syncSeqRef.current;
         syncDiaryEntries(currentUser.id, updatedEntries).then(merged => {
+          if (seq !== syncSeqRef.current) return;
           setDiaryEntries(merged);
           localStorage.setItem(diaryStorageKey, JSON.stringify(merged));
         }).catch(err => {
@@ -324,7 +331,9 @@ export default function BaraoDiary({ currentUser, onPromptAuth, onUserUpdate }: 
     setDiaryEntries(updatedEntries);
     localStorage.setItem(diaryStorageKey, JSON.stringify(updatedEntries));
     if (currentUser) {
+      const seq = ++syncSeqRef.current;
       syncDiaryEntries(currentUser.id, updatedEntries).then(merged => {
+        if (seq !== syncSeqRef.current) return;
         setDiaryEntries(merged);
         localStorage.setItem(diaryStorageKey, JSON.stringify(merged));
       }).catch(err => {
@@ -337,6 +346,8 @@ export default function BaraoDiary({ currentUser, onPromptAuth, onUserUpdate }: 
 
   // Delete Diary Entry
   const deleteDiaryEntry = (dayId: string) => {
+    // Invalida sincronizações em andamento para não ressuscitar na tela
+    syncSeqRef.current++;
     let updatedEntries = diaryEntries.filter(e => e.id !== dayId);
     setDiaryEntries(updatedEntries);
     localStorage.setItem(diaryStorageKey, JSON.stringify(updatedEntries));

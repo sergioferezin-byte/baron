@@ -276,7 +276,18 @@ export async function syncHistoryEntries(userId: string, localHistories: History
       const cloud = cloudOk ? cloudList.find(c => historyKey(c.title) === historyKey(local.title)) : undefined;
 
       if (cloud) {
-        reconciled.push({ ...local, synced: true });
+        // O banco é a fonte da verdade para o conteúdo: se a lembrança de
+        // mesmo título foi recriada/atualizada em outro aparelho, a versão
+        // do banco substitui a cópia local antiga
+        reconciled.push({
+          ...local,
+          title: cloud.title,
+          imageUrl: cloud.imageUrl || local.imageUrl,
+          description: cloud.description || local.description,
+          story: cloud.story || local.story,
+          createdAt: cloud.createdAt || local.createdAt,
+          synced: true
+        });
         continue;
       }
 
@@ -340,6 +351,9 @@ export async function syncHistoryEntries(userId: string, localHistories: History
         synced: true
       });
     }
+
+    // 4. Mais recentes primeiro, em todos os aparelhos
+    merged.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
     return merged;
   } catch (error) {
     console.error("[BackendSync Error] Failed to sync history entries:", error);

@@ -28,7 +28,7 @@ import {
 } from "lucide-react";
 
 import BaraoPaywall from "./BaraoPaywall";
-import { syncHistoryEntries, deleteCloudHistoryEntry, uploadAlbumPhoto } from "../utils/supabaseSync";
+import { syncHistoryEntries, deleteCloudHistoryEntry, uploadAlbumPhoto, apiFetch } from "../utils/supabaseSync";
 import { compressImageFile } from "../utils/imageCompress";
 import { requestBaraoImageUrl } from "../utils/baraoImage";
 
@@ -72,6 +72,8 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
   const [uploadTitle, setUploadTitle] = useState("");
   const [uploadDescription, setUploadDescription] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Número de série da sincronização: só o resultado da mais recente vale
+  const syncSeqRef = useRef(0);
 
   // Loading & error states
   const [isWeavingStory, setIsWeavingStory] = useState(false);
@@ -111,15 +113,21 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
         parsedEntries = [];
       }
     }
+    // Mais recentes primeiro
+    parsedEntries.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
     setHistoryList(parsedEntries);
 
-    // Dynamic background merge with Firestore lifeEvents
+    // Background merge com o banco (o resultado só é aplicado se ainda for
+    // a sincronização mais recente — evita que uma resposta atrasada
+    // sobrescreva mudanças feitas enquanto ela rodava)
     if (currentUser) {
+      const seq = ++syncSeqRef.current;
       syncHistoryEntries(currentUser.id, parsedEntries).then(merged => {
+        if (seq !== syncSeqRef.current) return;
         setHistoryList(merged);
         localStorage.setItem(historyStorageKey, JSON.stringify(merged));
       }).catch(err => {
-        console.warn("[FirebaseSync History] Error merging cloud records: ", err);
+        console.warn("[BackendSync History] Error merging cloud records: ", err);
       });
     }
   }, [currentUser, historyStorageKey, featureToggleKey]);
@@ -339,7 +347,9 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
       setHistoryList(updated);
       localStorage.setItem(historyStorageKey, JSON.stringify(updated));
       if (currentUser) {
+        const seq = ++syncSeqRef.current;
         syncHistoryEntries(currentUser.id, updated).then(merged => {
+          if (seq !== syncSeqRef.current) return;
           // Persiste as marcas de sincronização (evita reenvio/ressurreição)
           setHistoryList(merged);
           localStorage.setItem(historyStorageKey, JSON.stringify(merged));
@@ -373,10 +383,26 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
       });
       setHistoryList(updated);
       localStorage.setItem(historyStorageKey, JSON.stringify(updated));
+
+      // Envia a crônica regenerada direto ao banco (upsert por título) —
+      // a sincronização normal não atualiza entradas que já existem lá
       if (currentUser) {
-        syncHistoryEntries(currentUser.id, updated).catch(err => {
-          console.warn("[FirebaseSync History Regenerate]: ", err);
-        });
+        const entry = updated.find(e => e.id === dayId);
+        if (entry) {
+          apiFetch("/api/albums", {
+            method: "POST",
+            body: JSON.stringify({
+              uid: currentUser.id,
+              title: entry.title,
+              description: entry.description,
+              story: entry.story,
+              // Base64 não vai no update; o servidor preserva a imagem já salva
+              imageUrl: entry.imageUrl && entry.imageUrl.startsWith("http") ? entry.imageUrl : null
+            })
+          }).catch(err => {
+            console.warn("[BackendSync History Regenerate]: ", err);
+          });
+        }
       }
     } catch (err) {
       console.error(err);
@@ -387,6 +413,9 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
 
   // Delete specific memory image & story (local + banco, senão ela volta na sincronização)
   const handleDeleteEntry = (id: string) => {
+    // Invalida sincronizações em andamento: o resultado delas não deve
+    // reintroduzir na tela o item que acabou de ser apagado
+    syncSeqRef.current++;
     const entryToDelete = historyList.find(e => e.id === id);
     const updated = historyList.filter(e => e.id !== id);
     setHistoryList(updated);

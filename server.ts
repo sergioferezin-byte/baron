@@ -2955,8 +2955,16 @@ app.post("/api/albums", requireAuth, async (req: AuthRequest, res) => {
       .limit(1);
 
     if (existing) {
+      // Atualização sem imagem nova preserva a imagem já guardada na linha
+      let keepImageUrl = finalImageUrl;
+      if (!keepImageUrl && existing.descricaoMomento?.startsWith("{")) {
+        try {
+          keepImageUrl = JSON.parse(existing.descricaoMomento)?.imageUrl || null;
+        } catch {}
+      }
+
       const [updatedEntry] = await db.update(albumEmocional).set({
-        descricaoMomento: descData,
+        descricaoMomento: JSON.stringify({ prompt: description, imageUrl: keepImageUrl }),
         cronicaPoetica: story || ""
       }).where(eq(albumEmocional.id, existing.id)).returning();
       return res.json(updatedEntry);
