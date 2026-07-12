@@ -1714,22 +1714,23 @@ app.post("/api/image/generate", async (req, res) => {
 
     const mentionsBarao = /bar[aã]o/i.test(`${title || ""} ${description}`);
 
-    // Decisão reserva caso o DeepSeek esteja indisponível
+    // Decisão reserva caso o DeepSeek esteja indisponível.
+    // Importante: nunca colocar o título no prompt — modelos tendem a
+    // escrever palavras citadas como texto dentro da imagem.
     const fallbackPlan = () => {
-      const titlePart = title ? `"${String(title).slice(0, 120)}". ` : "";
       let refsPart = "";
       if (mentionsBarao && userPhotoUrl) {
-        refsPart = "The scene features the man from reference image 1 and the woman from reference image 2, keeping their faces exactly as in the reference photos. ";
+        refsPart = "The scene features the man from reference image 1 and the woman from reference image 2; their faces must match the reference photos exactly. ";
       } else if (mentionsBarao) {
-        refsPart = "The scene features the man from the reference image, keeping his face exactly as in the reference photo. ";
+        refsPart = "The scene features the man from the reference image; his face must match the reference photo exactly. ";
       } else if (userPhotoUrl) {
-        refsPart = "The scene features the person from the reference image, keeping their face exactly as in the reference photo. ";
+        refsPart = "The scene features the person from the reference image; their face must match the reference photo exactly. ";
       }
       return {
         prompt: (
-          `Realistic cinematic photograph, warm golden natural light, cozy intimate atmosphere, shallow depth of field, highly detailed, no text or letters in the image. ` +
+          `Ultra-realistic photograph shot on a professional full-frame camera, 50mm lens, natural skin texture, warm golden natural light, cozy intimate atmosphere, shallow depth of field. Absolutely not a painting, illustration or drawing. The image contains no text, letters, captions or typography of any kind. ` +
           refsPart +
-          `Scene inspired by this personal memory: ${titlePart}${String(description)}`
+          `Scene: ${String(description)}`
         ).slice(0, 990),
         includeBarao: mentionsBarao,
         includeUser: !!userPhotoUrl
@@ -1747,7 +1748,8 @@ app.post("/api/image/generate", async (req, res) => {
             role: "system",
             content:
               `You prepare inputs for a photorealistic image generation model. You receive a personal memory (title and description in Portuguese) and which reference photos are available. Reply ONLY with minified JSON in this exact shape: {"prompt":"...","includeBarao":true,"includeUser":false}.\n` +
-              `Rules for "prompt" (ENGLISH, max 850 characters): describe ONE realistic photographic scene that faithfully depicts the concrete elements of the memory — places, objects, people, weather, time of day and mood. Style: realistic cinematic photograph, warm golden natural light, cozy intimate atmosphere, shallow depth of field, highly detailed. The image must never contain text, letters, captions or watermarks.\n` +
+              `Rules for "prompt" (ENGLISH, max 850 characters): describe ONE photographic scene that faithfully depicts the concrete elements of the memory — places, objects, people, weather, time of day and mood. Style words to always include: "ultra-realistic photograph shot on a professional full-frame camera, 50mm lens, natural skin texture, warm golden natural light, cozy intimate atmosphere, shallow depth of field" and "absolutely not a painting, illustration or drawing".\n` +
+              `The image must never contain text: state that no text, letters, captions or typography appear in the image. NEVER write the memory title in the prompt and NEVER put any words in quotation marks — quoted words get rendered as text inside the image.\n` +
               `"includeBarao": true only if the memory mentions "Barão" (the user's male AI companion). His portrait will be attached as reference image 1 — refer to him in the prompt as "the man from reference image 1" and say his face must match the reference exactly; do not invent his appearance.\n` +
               `"includeUser": true only if a user photo is available AND the memory implies the user herself appears in the scene (first-person presence, e.g. "eu", "nós", "comigo"). Her photo will be attached as the next reference image — refer to her as "the woman from the user reference photo" and say her face must match the reference exactly.\n` +
               `If a reference is not included, do not mention it in the prompt.`
@@ -1783,8 +1785,10 @@ app.post("/api/image/generate", async (req, res) => {
 
     // Com referências: nano-banana-2 (preserva rostos). Sem: z-image (barato)
     let taskId: string;
+    let usedModel: string;
     if (imageInput.length > 0) {
-      taskId = await createKieTask("nano-banana-2", {
+      usedModel = "nano-banana-2";
+      taskId = await createKieTask(usedModel, {
         prompt: plan.prompt,
         image_input: imageInput,
         aspect_ratio: "4:3",
@@ -1792,13 +1796,15 @@ app.post("/api/image/generate", async (req, res) => {
         output_format: "png"
       });
     } else {
-      taskId = await createKieTask("z-image", {
+      usedModel = "z-image";
+      taskId = await createKieTask(usedModel, {
         prompt: plan.prompt,
         aspect_ratio: "4:3"
       });
     }
 
-    res.json({ taskId });
+    // model/prompt/refs ajudam a diagnosticar gerações fora do esperado
+    res.json({ taskId, model: usedModel, refs: imageInput.length, prompt: plan.prompt });
   } catch (error: any) {
     console.error("[Image Generate] Failed:", error);
     res.status(500).json({
