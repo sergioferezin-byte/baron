@@ -181,21 +181,48 @@ export async function deleteCloudDiaryEntry(userId: string, dayId: string) {
   }
 }
 
+interface CloudHistoryEntry {
+  id: number;
+  title: string;
+  description: string | null;
+  story: string | null;
+  imageUrl: string | null;
+  createdAt?: string;
+}
+
+// Chave de comparação por título (o backend faz upsert por usuário+título)
+function historyKey(title: string): string {
+  return (title || "").trim().toLowerCase().slice(0, 155);
+}
+
 /**
- * Sync history entries with backend 'album_emocional' table
+ * Sync history entries with backend 'album_emocional' table.
+ * Local entries win (they carry type/createdAt); cloud-only entries are
+ * mapped back to the HistoryEntry shape. Duplicates (same title) are
+ * collapsed so the UI never shows the same memory twice.
  */
 export async function syncHistoryEntries(userId: string, localHistories: HistoryEntry[]): Promise<HistoryEntry[]> {
   try {
+    // 0. Collapse local duplicates left behind by older sync versions
+    const dedupedLocal: HistoryEntry[] = [];
+    const seen = new Set<string>();
+    for (const local of localHistories) {
+      const key = historyKey(local.title);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      dedupedLocal.push(local);
+    }
+
     // 1. Get existing from backend
     const res = await apiFetch(`/api/albums?uid=${userId}`);
     if (!res.ok) throw new Error("Failed to load album history");
-    const cloudList: HistoryEntry[] = await res.json();
+    const cloudList: CloudHistoryEntry[] = await res.json();
 
     // 2. Upload any local histories that don't exist in the database
-    for (const local of localHistories) {
-      const exists = cloudList.some(c => c.title === local.title);
+    for (const local of dedupedLocal) {
+      const exists = cloudList.some(c => historyKey(c.title) === historyKey(local.title));
       if (!exists) {
-        await apiFetch("/api/albums", {
+        const postRes = await apiFetch("/api/albums", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -206,18 +233,55 @@ export async function syncHistoryEntries(userId: string, localHistories: History
             imageUrl: local.imageUrl
           })
         });
+        if (!postRes.ok) {
+          console.error(
+            `[BackendSync Error] Failed to save album entry "${local.title}":`,
+            postRes.status,
+            await postRes.text().catch(() => "")
+          );
+        }
       }
     }
 
-    // 3. Get final list
-    const finalRes = await apiFetch(`/api/albums?uid=${userId}`);
-    if (finalRes.ok) {
-      return await finalRes.json();
+    // 3. Merge: local entries first, then cloud-only ones (dedup by title)
+    const merged: HistoryEntry[] = [...dedupedLocal];
+    for (const cloud of cloudList) {
+      const key = historyKey(cloud.title);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push({
+        id: "cloud-" + cloud.id,
+        title: cloud.title,
+        imageUrl: cloud.imageUrl || "",
+        description: cloud.description || "",
+        story: cloud.story || "",
+        type: "upload",
+        createdAt: cloud.createdAt || new Date().toISOString()
+      });
     }
-    return cloudList;
+    return merged;
   } catch (error) {
     console.error("[BackendSync Error] Failed to sync history entries:", error);
     return localHistories;
+  }
+}
+
+/**
+ * Delete an album memory from the backend by its title, removing every
+ * duplicated row that shares the same title so it doesn't come back on
+ * the next sync.
+ */
+export async function deleteCloudHistoryEntry(userId: string, title: string) {
+  try {
+    const res = await apiFetch(`/api/albums?uid=${userId}`);
+    if (!res.ok) return;
+    const cloudList: CloudHistoryEntry[] = await res.json();
+    const targets = cloudList.filter(c => historyKey(c.title) === historyKey(title));
+    for (const target of targets) {
+      await apiFetch(`/api/albums/${target.id}`, { method: "DELETE" });
+    }
+  } catch (error) {
+    console.error("[BackendSync Error] Failed to delete album entry:", error);
   }
 }
 

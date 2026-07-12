@@ -2736,10 +2736,25 @@ app.post("/api/albums", requireAuth, async (req: AuthRequest, res) => {
 
     // Store extra fields like image_url in a compact JSON string inside description
     const descData = JSON.stringify({ prompt: description, imageUrl });
+    const safeTitle = String(title).slice(0, 155); // limite da coluna titulo_momento
+
+    // Upsert por (usuário, título): sincronizações concorrentes atualizam a
+    // mesma lembrança em vez de criar linhas duplicadas
+    const [existing] = await db.select().from(albumEmocional)
+      .where(and(eq(albumEmocional.usuarioId, userDbId), eq(albumEmocional.tituloMomento, safeTitle)))
+      .limit(1);
+
+    if (existing) {
+      const [updatedEntry] = await db.update(albumEmocional).set({
+        descricaoMomento: descData,
+        cronicaPoetica: story || ""
+      }).where(eq(albumEmocional.id, existing.id)).returning();
+      return res.json(updatedEntry);
+    }
 
     const [newEntry] = await db.insert(albumEmocional).values({
       usuarioId: userDbId,
-      tituloMomento: title,
+      tituloMomento: safeTitle,
       descricaoMomento: descData,
       cronicaPoetica: story || ""
     }).returning();

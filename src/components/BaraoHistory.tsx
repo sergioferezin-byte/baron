@@ -25,7 +25,7 @@ import {
 } from "lucide-react";
 
 import BaraoPaywall from "./BaraoPaywall";
-import { syncHistoryEntries } from "../utils/supabaseSync";
+import { syncHistoryEntries, deleteCloudHistoryEntry } from "../utils/supabaseSync";
 import { requestBaraoImageUrl } from "../utils/baraoImage";
 
 interface BaraoHistoryProps {
@@ -312,14 +312,15 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
     }
   };
 
-  // Delete specific memory image & story
+  // Delete specific memory image & story (local + banco, senão ela volta na sincronização)
   const handleDeleteEntry = (id: string) => {
+    const entryToDelete = historyList.find(e => e.id === id);
     const updated = historyList.filter(e => e.id !== id);
     setHistoryList(updated);
     localStorage.setItem(historyStorageKey, JSON.stringify(updated));
-    if (currentUser) {
-      syncHistoryEntries(currentUser.id, updated).catch(err => {
-        console.warn("[FirebaseSync History Delete]: ", err);
+    if (currentUser && entryToDelete) {
+      deleteCloudHistoryEntry(currentUser.id, entryToDelete.title).catch(err => {
+        console.warn("[BackendSync History Delete]: ", err);
       });
     }
   };
