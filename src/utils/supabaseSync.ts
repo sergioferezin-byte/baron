@@ -203,12 +203,20 @@ function historyKey(title: string): string {
  */
 export async function syncHistoryEntries(userId: string, localHistories: HistoryEntry[]): Promise<HistoryEntry[]> {
   try {
-    // 0. Collapse local duplicates left behind by older sync versions
+    // 0. Collapse local duplicates left behind by older sync versions,
+    //    keeping the copy that has an image/story when they differ
     const dedupedLocal: HistoryEntry[] = [];
     const seen = new Set<string>();
     for (const local of localHistories) {
       const key = historyKey(local.title);
-      if (seen.has(key)) continue;
+      if (seen.has(key)) {
+        const kept = dedupedLocal.find(l => historyKey(l.title) === key);
+        if (kept) {
+          if (!kept.imageUrl && local.imageUrl) kept.imageUrl = local.imageUrl;
+          if (!kept.story && local.story) kept.story = local.story;
+        }
+        continue;
+      }
       seen.add(key);
       dedupedLocal.push(local);
     }
@@ -243,11 +251,20 @@ export async function syncHistoryEntries(userId: string, localHistories: History
       }
     }
 
-    // 3. Merge: local entries first, then cloud-only ones (dedup by title)
+    // 3. Merge: local entries first, then cloud-only ones (dedup by title).
+    //    If the local copy lost its image (ex.: localStorage cheio), adota a
+    //    imagem guardada no banco.
     const merged: HistoryEntry[] = [...dedupedLocal];
     for (const cloud of cloudList) {
       const key = historyKey(cloud.title);
-      if (seen.has(key)) continue;
+      if (seen.has(key)) {
+        const existing = merged.find(l => historyKey(l.title) === key);
+        if (existing) {
+          if (!existing.imageUrl && cloud.imageUrl) existing.imageUrl = cloud.imageUrl;
+          if (!existing.story && cloud.story) existing.story = cloud.story;
+        }
+        continue;
+      }
       seen.add(key);
       merged.push({
         id: "cloud-" + cloud.id,
@@ -263,6 +280,24 @@ export async function syncHistoryEntries(userId: string, localHistories: History
   } catch (error) {
     console.error("[BackendSync Error] Failed to sync history entries:", error);
     return localHistories;
+  }
+}
+
+/**
+ * Upload a user photo (base64 data URL) to the backend Storage and return
+ * its lightweight public URL, or null on failure.
+ */
+export async function uploadAlbumPhoto(dataUrl: string): Promise<string | null> {
+  try {
+    const res = await apiFetch("/api/image/upload", {
+      method: "POST",
+      body: JSON.stringify({ dataUrl })
+    });
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => null);
+    return data?.url || null;
+  } catch {
+    return null;
   }
 }
 

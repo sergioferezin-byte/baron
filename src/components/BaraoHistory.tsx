@@ -25,7 +25,7 @@ import {
 } from "lucide-react";
 
 import BaraoPaywall from "./BaraoPaywall";
-import { syncHistoryEntries, deleteCloudHistoryEntry } from "../utils/supabaseSync";
+import { syncHistoryEntries, deleteCloudHistoryEntry, uploadAlbumPhoto } from "../utils/supabaseSync";
 import { requestBaraoImageUrl } from "../utils/baraoImage";
 
 interface BaraoHistoryProps {
@@ -51,10 +51,12 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
 
   const historyStorageKey = currentUser ? `barao_history_entries_${currentUser.id}` : "barao_history_entries_guest";
   const featureToggleKey = currentUser ? `barao_history_enabled_${currentUser.id}` : "barao_history_enabled_guest";
+  const monoFilterKey = currentUser ? `barao_history_mono_${currentUser.id}` : "barao_history_mono_guest";
 
   // Core state
   const [historyList, setHistoryList] = useState<HistoryEntry[]>([]);
   const [isFeatureEnabled, setIsFeatureEnabled] = useState<boolean>(true);
+  const [isMonochrome, setIsMonochrome] = useState<boolean>(true);
   
   // Custom creator states
   const [isCreatorOpen, setIsCreatorOpen] = useState(false);
@@ -84,6 +86,10 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
       setIsFeatureEnabled(true);
     }
 
+    // 1.5 Monochrome filter preference (padrão: ligado, o visual original)
+    const savedMono = localStorage.getItem(monoFilterKey);
+    setIsMonochrome(savedMono === null ? true : savedMono === "true");
+
     // 2. Load History entries
     const savedEntries = localStorage.getItem(historyStorageKey);
     let parsedEntries: HistoryEntry[] = [];
@@ -112,6 +118,13 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
     const newVal = !isFeatureEnabled;
     setIsFeatureEnabled(newVal);
     localStorage.setItem(featureToggleKey, String(newVal));
+  };
+
+  // Handle Monochrome filter toggle
+  const handleToggleMonochrome = () => {
+    const newVal = !isMonochrome;
+    setIsMonochrome(newVal);
+    localStorage.setItem(monoFilterKey, String(newVal));
   };
 
   // Process and convert image uploads to base64
@@ -224,6 +237,16 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
       //    a poetic image from the memory's description (kie.ai + Z-Image)
       let finalImgUrl = uploadedBase64;
       let entryType: HistoryEntry["type"] = "upload";
+
+      // Foto enviada vira URL leve no Storage — evita estourar o limite do
+      // navegador (localStorage) e o de 4,5MB das requisições na Vercel
+      if (finalImgUrl && finalImgUrl.startsWith("data:image") && currentUser) {
+        const hostedUrl = await uploadAlbumPhoto(finalImgUrl);
+        if (hostedUrl) {
+          finalImgUrl = hostedUrl;
+        }
+      }
+
       if (!finalImgUrl) {
         // Foto de perfil da usuária como referência para manter o rosto fiel
         let userPhoto: string | undefined;
@@ -341,31 +364,59 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
           </p>
         </div>
 
-        {/* Configurations Toggle (Geometric Pill) */}
-        <div className="flex items-center gap-3 self-stretch md:self-auto justify-between bg-black/60 p-3 rounded-sm border border-white/5 shrink-0">
-          <div className="flex items-center gap-2">
-            <Sliders className="h-4 w-4 text-barao-rose shrink-0" />
-            <div className="text-left leading-none">
-              <span className="block text-[9px] uppercase font-mono tracking-wider font-bold text-white">
-                Álbum Ativado
-              </span>
-              <span className="text-[8px] font-serif italic text-zinc-500">
-                {isFeatureEnabled ? "Exibindo retratos" : "Oculto dos olhos do mundo"}
-              </span>
+        {/* Configurations Toggles (Geometric Pills) */}
+        <div className="flex flex-col gap-2 self-stretch md:self-auto shrink-0">
+          <div className="flex items-center gap-3 justify-between bg-black/60 p-3 rounded-sm border border-white/5">
+            <div className="flex items-center gap-2">
+              <Sliders className="h-4 w-4 text-barao-rose shrink-0" />
+              <div className="text-left leading-none">
+                <span className="block text-[9px] uppercase font-mono tracking-wider font-bold text-white">
+                  Álbum Ativado
+                </span>
+                <span className="text-[8px] font-serif italic text-zinc-500">
+                  {isFeatureEnabled ? "Exibindo retratos" : "Oculto dos olhos do mundo"}
+                </span>
+              </div>
             </div>
-          </div>
-          <button
-            onClick={handleToggleFeature}
-            className={`relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-              isFeatureEnabled ? "bg-barao-rose" : "bg-zinc-850"
-            }`}
-          >
-            <span
-              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-black shadow ring-0 transition duration-200 ease-in-out ${
-                isFeatureEnabled ? "translate-x-5" : "translate-x-0"
+            <button
+              onClick={handleToggleFeature}
+              className={`relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                isFeatureEnabled ? "bg-barao-rose" : "bg-zinc-850"
               }`}
-            />
-          </button>
+            >
+              <span
+                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-black shadow ring-0 transition duration-200 ease-in-out ${
+                  isFeatureEnabled ? "translate-x-5" : "translate-x-0"
+                }`}
+              />
+            </button>
+          </div>
+
+          <div className="flex items-center gap-3 justify-between bg-black/60 p-3 rounded-sm border border-white/5">
+            <div className="flex items-center gap-2">
+              <ImageIcon className="h-4 w-4 text-barao-rose shrink-0" />
+              <div className="text-left leading-none">
+                <span className="block text-[9px] uppercase font-mono tracking-wider font-bold text-white">
+                  Filtro Preto e Branco
+                </span>
+                <span className="text-[8px] font-serif italic text-zinc-500">
+                  {isMonochrome ? "Retratos em tons clássicos" : "Retratos em cores vivas"}
+                </span>
+              </div>
+            </div>
+            <button
+              onClick={handleToggleMonochrome}
+              className={`relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                isMonochrome ? "bg-barao-rose" : "bg-zinc-850"
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-black shadow ring-0 transition duration-200 ease-in-out ${
+                  isMonochrome ? "translate-x-5" : "translate-x-0"
+                }`}
+              />
+            </button>
+          </div>
         </div>
       </div>
 
@@ -598,7 +649,9 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
                         src={item.imageUrl}
                         alt={item.title}
                         referrerPolicy="no-referrer"
-                        className="h-full w-full object-cover grayscale brightness-95 filter transition group-hover:grayscale-0 duration-700"
+                        className={`h-full w-full object-cover transition duration-700 ${
+                          isMonochrome ? "grayscale brightness-95 filter group-hover:grayscale-0" : ""
+                        }`}
                       />
 
                       {/* Header floating badge */}

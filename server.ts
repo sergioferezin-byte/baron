@@ -1819,6 +1819,27 @@ app.post("/api/image/generate", async (req, res) => {
   }
 });
 
+// Recebe a foto enviada pela usuária (base64) e a hospeda no Storage,
+// devolvendo uma URL leve — evita base64 gigante no banco, no localStorage
+// e nos limites de 4,5MB de requisição/resposta da Vercel
+app.post("/api/image/upload", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const { dataUrl } = req.body;
+    if (!dataUrl || typeof dataUrl !== "string" || !dataUrl.startsWith("data:image")) {
+      return res.status(400).json({ error: "dataUrl de imagem é obrigatória" });
+    }
+
+    const url = await uploadDataUrlToStorage(dataUrl, "album");
+    if (!url) {
+      return res.status(500).json({ error: "Falha ao guardar a imagem no Storage." });
+    }
+    res.json({ url });
+  } catch (error: any) {
+    console.error("[Image Upload] Failed:", error);
+    res.status(500).json({ error: "Erro ao subir a imagem." });
+  }
+});
+
 // Consulta o status da imagem; quando pronta, persiste no Storage e devolve a URL
 app.get("/api/image/status/:taskId", async (req, res) => {
   try {
