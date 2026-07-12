@@ -1799,25 +1799,23 @@ app.post("/api/image/generate", async (req, res) => {
     }
 
     const userPhotoUrl = attachedPhotoUrl || profilePhotoUrl;
-    const mentionsBarao = /bar[aã]o/i.test(`${title || ""} ${description}`);
 
     // Regras de referência:
-    // - Com foto anexada: ela é a base; o Barão entra se for mencionado.
-    // - Sem foto anexada: retrato do Barão + foto de perfil (quando houver)
-    //   entram SEMPRE como referências da cena.
-    const includeBarao = isAttached ? mentionsBarao : true;
+    // - O retrato do Barão é SEMPRE a referência 1, em toda geração:
+    //   qualquer homem na cena deve ser ele — nunca um homem inventado.
+    // - Com foto anexada: ela é a base da cena (referência 2).
+    // - Sem foto anexada: a foto de perfil (quando houver) é a referência 2.
+    const includeBarao = true;
     const includeUser = isAttached ? true : !!profilePhotoUrl;
 
     // Descrição das referências que serão anexadas (para o prompt saber
     // exatamente quem aparece na cena)
     const refLines: string[] = [];
-    if (includeBarao) {
-      refLines.push(`Reference image ${refLines.length + 1}: portrait of the Barão (the user's male companion) — he MUST appear in the scene and his face must match this reference exactly; do not invent his appearance.`);
-    }
+    refLines.push(`Reference image 1: portrait of the Barão (the user's male companion). CRITICAL RULE: any man appearing in the scene MUST be exactly this man — same face, same hair, same beard as reference image 1. NEVER invent, imagine or describe a different man.`);
     if (includeUser && userPhotoUrl) {
       refLines.push(
         isAttached
-          ? `Reference image ${refLines.length + 1}: a photo ATTACHED by the user showing this memory — recreate the scene based on it, keeping the people, their faces and the key elements faithful, adapting the setting to the memory description.`
+          ? `Reference image ${refLines.length + 1}: a photo ATTACHED by the user showing this memory — recreate the scene based on it, keeping the people, their faces and the key elements faithful, adapting the setting to the memory description. If a man appears, his face must still be the man from reference image 1.`
           : `Reference image ${refLines.length + 1}: the user's profile photo — she MUST appear in the scene and her face must match this reference exactly.`
       );
     }
@@ -1827,7 +1825,8 @@ app.post("/api/image/generate", async (req, res) => {
     // escrever palavras citadas como texto dentro da imagem.
     const fallbackPrompt = () => (
       `Ultra-realistic photograph shot on a professional full-frame camera, 50mm lens, natural skin texture, warm golden natural light, cozy intimate atmosphere, shallow depth of field. Absolutely not a painting, illustration or drawing. The image contains no text, letters, captions or typography of any kind. ` +
-      (refLines.length > 0 ? `The people from the reference images appear in the scene with their faces kept exactly as in the references. ` : "") +
+      `Any man in the scene MUST be exactly the man from reference image 1 (same face, hair and beard) — never a different man. ` +
+      (refLines.length > 1 ? `The other people from the reference images appear with their faces kept exactly as in the references. ` : "") +
       `Scene: ${String(description)}`
     ).slice(0, 990);
 
@@ -1842,6 +1841,7 @@ app.post("/api/image/generate", async (req, res) => {
             content:
               `You write prompts in ENGLISH for a photorealistic image generation model. You receive a personal memory (title and description in Portuguese) and the list of reference photos that WILL be attached to the generation.\n` +
               `Write ONE prompt (max 850 characters) describing a single photographic scene that faithfully depicts the concrete elements of the memory — places, objects, people, weather, time of day and mood. Style words to always include: "ultra-realistic photograph shot on a professional full-frame camera, 50mm lens, natural skin texture, warm golden natural light, cozy intimate atmosphere, shallow depth of field" and "absolutely not a painting, illustration or drawing".\n` +
+              `ABSOLUTE RULE ABOUT THE MAN: reference image 1 is ALWAYS the portrait of the Barão, the user's male companion. If the scene contains any man ("Barão", "ele", "meu amor", a companion, or any male figure), that man IS the man from reference image 1 — write explicitly that his face, hair and beard must match reference image 1 exactly, and NEVER describe his appearance yourself or invent a different man.\n` +
               `Every person listed in the references MUST appear in the scene; refer to them by their reference image number and state that their faces must match the references exactly.\n` +
               `The image must never contain text: state that no text, letters, captions or typography appear in the image. NEVER write the memory title in the prompt and NEVER put any words in quotation marks — quoted words get rendered as text inside the image.\n` +
               `Reply with the prompt only, no quotes or explanations.`
