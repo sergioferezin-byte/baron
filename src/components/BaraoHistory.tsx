@@ -26,6 +26,7 @@ import {
 
 import BaraoPaywall from "./BaraoPaywall";
 import { syncHistoryEntries } from "../utils/supabaseSync";
+import { requestBaraoImageUrl } from "../utils/baraoImage";
 
 interface BaraoHistoryProps {
   currentUser: User | null;
@@ -206,9 +207,6 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
         }
       }
 
-      if (!uploadedBase64) {
-        throw new Error("Por favor adicione uma foto ou imagem da lembrança.");
-      }
       if (!uploadTitle.trim()) {
         throw new Error("Por favor dê um título ou nome a esta lembrança.");
       }
@@ -220,10 +218,20 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
       const finalDesc = uploadDescription;
 
       // 1. Ask Meu Barão to write the story narrative
-      const { story: narrationText } = await weaveStoryFromAI(finalTitle, finalDesc, uploadedBase64);
+      const { story: narrationText } = await weaveStoryFromAI(finalTitle, finalDesc, uploadedBase64 || undefined);
 
-      // 2. Use the user's original uploaded image as is (completely unaltered)
-      const finalImgUrl = uploadedBase64;
+      // 2. Use the user's uploaded image as is; without one, O Barão paints
+      //    a poetic image from the memory's description (kie.ai + Z-Image)
+      let finalImgUrl = uploadedBase64;
+      let entryType: HistoryEntry["type"] = "upload";
+      if (!finalImgUrl) {
+        const paintedUrl = await requestBaraoImageUrl(finalTitle, finalDesc);
+        if (!paintedUrl) {
+          throw new Error("Não consegui pintar a imagem desta lembrança neste instante. Tente novamente em alguns segundos ou anexe uma foto sua.");
+        }
+        finalImgUrl = paintedUrl;
+        entryType = "generated";
+      }
 
       const newEntry: HistoryEntry = {
         id: "h-" + Date.now(),
@@ -231,7 +239,7 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
         imageUrl: finalImgUrl,
         description: finalDesc,
         story: narrationText,
-        type: "upload",
+        type: entryType,
         createdAt: new Date().toISOString()
       };
 
@@ -434,7 +442,7 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
 
               <div className="space-y-4">
                 <p className="font-serif text-xs text-zinc-400 italic">
-                  Compartilhe uma fotografia, paisagem ou imagem de um momento especial e sintonize com Meu Barão. Escreva uma descrição ou desabafo poético logo abaixo para receber uma crônica marcante e terapêutica sobre o seu instante.
+                  Compartilhe uma fotografia, paisagem ou imagem de um momento especial e sintonize com Meu Barão. Escreva uma descrição ou desabafo poético logo abaixo para receber uma crônica marcante e terapêutica sobre o seu instante. Se preferir não enviar foto, Meu Barão pintará uma imagem poética exclusiva a partir das suas palavras.
                 </p>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
@@ -476,8 +484,9 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
                       <div className="flex flex-col items-center justify-center gap-2">
                         <Upload className="h-6 w-6 text-barao-rose animate-bounce" />
                         <div>
-                          <p className="font-serif text-xs font-medium text-white">Carregar Sua Imagem</p>
+                          <p className="font-serif text-xs font-medium text-white">Carregar Sua Imagem (Opcional)</p>
                           <p className="text-[10px] text-zinc-500 font-mono uppercase mt-1">Arrastar e soltar ou clique para procurar</p>
+                          <p className="text-[10px] text-zinc-500 font-serif italic mt-1.5">Sem foto? O Barão pinta uma imagem poética para esta lembrança.</p>
                         </div>
                       </div>
                     )}
@@ -523,7 +532,7 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
                 </button>
                 <button
                   onClick={handleCreateMemory}
-                  disabled={isWeavingStory || !uploadedBase64}
+                  disabled={isWeavingStory || !uploadTitle.trim() || !uploadDescription.trim()}
                   className="px-5 py-2 bg-barao-rose text-black font-bold rounded-sm hover:bg-barao-gold disabled:opacity-50 transition flex items-center gap-1.5"
                 >
                   {isWeavingStory ? (

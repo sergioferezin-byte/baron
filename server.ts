@@ -410,37 +410,59 @@ async function getKieTask(taskId: string): Promise<{ state: string; resultUrls: 
 }
 
 // Os arquivos gerados pelo kie.ai expiram em ~24h; salvamos no Supabase Storage
-// para que os áudios das mensagens permaneçam reproduzíveis para sempre.
+// para que áudios e imagens permaneçam acessíveis para sempre.
 const VOICE_BUCKET = "barao-voz";
-let voiceBucketReady = false;
+const IMAGE_BUCKET = "barao-imagens";
+const readyBuckets = new Set<string>();
 
-async function persistKieAudio(kieUrl: string): Promise<string> {
+async function persistKieMedia(
+  kieUrl: string,
+  bucket: string,
+  folder: string,
+  contentType: string,
+  ext: string
+): Promise<string> {
   if (!supabaseAdmin) return kieUrl;
   try {
-    if (!voiceBucketReady) {
-      await supabaseAdmin.storage.createBucket(VOICE_BUCKET, { public: true }).catch(() => {});
-      voiceBucketReady = true;
+    if (!readyBuckets.has(bucket)) {
+      await supabaseAdmin.storage.createBucket(bucket, { public: true }).catch(() => {});
+      readyBuckets.add(bucket);
     }
 
     const resp = await fetch(kieUrl);
     if (!resp.ok) return kieUrl;
     const buffer = Buffer.from(await resp.arrayBuffer());
 
-    const filePath = `tts/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.mp3`;
+    const filePath = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
     const { error } = await supabaseAdmin.storage
-      .from(VOICE_BUCKET)
-      .upload(filePath, buffer, { contentType: "audio/mpeg" });
+      .from(bucket)
+      .upload(filePath, buffer, { contentType });
     if (error) {
-      console.error("[Voice Storage] Upload failed, using temporary URL:", error.message);
+      console.error("[Kie Storage] Upload failed, using temporary URL:", error.message);
       return kieUrl;
     }
 
-    const { data } = supabaseAdmin.storage.from(VOICE_BUCKET).getPublicUrl(filePath);
+    const { data } = supabaseAdmin.storage.from(bucket).getPublicUrl(filePath);
     return data?.publicUrl || kieUrl;
   } catch (err) {
-    console.error("[Voice Storage] Persist failed, using temporary URL:", err);
+    console.error("[Kie Storage] Persist failed, using temporary URL:", err);
     return kieUrl;
   }
+}
+
+async function persistKieAudio(kieUrl: string): Promise<string> {
+  return persistKieMedia(kieUrl, VOICE_BUCKET, "tts", "audio/mpeg", "mp3");
+}
+
+async function persistKieImage(kieUrl: string): Promise<string> {
+  const isPng = kieUrl.toLowerCase().includes(".png");
+  return persistKieMedia(
+    kieUrl,
+    IMAGE_BUCKET,
+    "album",
+    isPng ? "image/png" : "image/jpeg",
+    isPng ? "png" : "jpg"
+  );
 }
 
 const CONVERSATIONAL_RHYTHM = `
@@ -1619,6 +1641,67 @@ app.get("/api/voice/status/:taskId", async (req, res) => {
   } catch (error: any) {
     console.error("[Voice Status] Failed:", error);
     res.status(500).json({ error: "Erro ao consultar a voz do Barão." });
+  }
+});
+
+// ==========================================
+// IMAGENS POÉTICAS DO ÁLBUM (kie.ai + Z-Image)
+// ==========================================
+
+// Inicia a geração de uma imagem poética para uma lembrança sem foto
+app.post("/api/image/generate", async (req, res) => {
+  try {
+    const { title, description } = req.body;
+    if (!description || typeof description !== "string" || !description.trim()) {
+      return res.status(400).json({ error: "description é obrigatória" });
+    }
+
+    if (!process.env.KIE_API_KEY) {
+      return res.status(200).json({
+        isConfigError: true,
+        error: "KIE_API_KEY não configurada."
+      });
+    }
+
+    // Z-Image aceita prompts de até 1000 caracteres
+    const titlePart = title ? ` intitulada "${String(title).slice(0, 120)}"` : "";
+    const prompt = `Pintura artística poética e onírica em estilo fine-art, luz suave e dourada, atmosfera acolhedora com leve melancolia, cores quentes e profundas, sem nenhum texto ou letras na imagem. Retrata uma lembrança emocional${titlePart}: ${String(description)}`.slice(0, 990);
+
+    const taskId = await createKieTask("z-image", {
+      prompt,
+      aspect_ratio: "4:3"
+    });
+
+    res.json({ taskId });
+  } catch (error: any) {
+    console.error("[Image Generate] Failed:", error);
+    res.status(500).json({ error: "Erro ao iniciar a pintura da lembrança." });
+  }
+});
+
+// Consulta o status da imagem; quando pronta, persiste no Storage e devolve a URL
+app.get("/api/image/status/:taskId", async (req, res) => {
+  try {
+    const task = await getKieTask(req.params.taskId);
+
+    if (task.state === "success") {
+      const kieUrl = task.resultUrls[0];
+      if (!kieUrl) {
+        return res.json({ state: "fail", error: "Nenhuma imagem retornada pela geração." });
+      }
+      const imageUrl = await persistKieImage(kieUrl);
+      return res.json({ state: "success", imageUrl });
+    }
+
+    if (task.state === "fail") {
+      console.error("[Image Status] kie.ai generation failed:", task.failMsg);
+      return res.json({ state: "fail", error: task.failMsg || "Falha na geração da imagem." });
+    }
+
+    res.json({ state: "processing" });
+  } catch (error: any) {
+    console.error("[Image Status] Failed:", error);
+    res.status(500).json({ error: "Erro ao consultar a pintura da lembrança." });
   }
 });
 
