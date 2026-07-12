@@ -8,7 +8,7 @@ import {
 import { User } from "../types";
 import { renderAvatarSvgOrImg } from "../utils/avatar";
 import BaraoPaywall from "./BaraoPaywall";
-import { syncUserProfile } from "../utils/supabaseSync";
+import { syncUserProfile, fetchUserProfile } from "../utils/supabaseSync";
 
 const SESSION_USER_KEY = "mb_logged_user";
 
@@ -145,21 +145,43 @@ export default function UserProfilePanel({ currentUser, onTabChange, onUserUpdat
     } else {
       setProfile({});
     }
+
+    // Restaura o perfil guardado no banco quando este navegador ainda não
+    // tem uma cópia local (troca de aparelho, cache limpo etc.)
+    if (currentUser) {
+      fetchUserProfile(currentUser.id).then(remote => {
+        if (!remote || Object.keys(remote).length === 0) return;
+        const local = localStorage.getItem(profileStorageKey);
+        if (!local || local === "{}") {
+          setProfile(remote);
+          localStorage.setItem(profileStorageKey, JSON.stringify(remote));
+        }
+      }).catch(() => {});
+    }
   }, [profileStorageKey]);
 
   // Save changes helper
   const saveProfile = (newProfile: UserProfileData) => {
     setProfile(newProfile);
     localStorage.setItem(profileStorageKey, JSON.stringify(newProfile));
-    
-    // If logged in, update currentUser's local copy just in case
-    if (currentUser && newProfile.nickname) {
-      const updatedUser = { ...currentUser, nickname: newProfile.nickname };
-      localStorage.setItem(SESSION_USER_KEY, JSON.stringify(updatedUser));
-      
-      // Sync to Firestore in background
-      syncUserProfile(updatedUser, newProfile).catch(err => {
-        console.warn("[FirebaseSync User] Warning syncing preferences: ", err);
+
+    // If logged in, sync the whole profile (photo included) to the backend
+    if (currentUser) {
+      const updatedUser = newProfile.nickname ? { ...currentUser, nickname: newProfile.nickname } : currentUser;
+      if (newProfile.nickname) {
+        localStorage.setItem(SESSION_USER_KEY, JSON.stringify(updatedUser));
+      }
+
+      syncUserProfile(updatedUser, newProfile).then(serverProfile => {
+        // O servidor troca a foto base64 por uma URL permanente do Storage;
+        // adota a URL local para não reenviar a foto a cada salvamento
+        if (serverProfile?.avatarUrl && serverProfile.avatarUrl !== newProfile.avatarUrl) {
+          const merged = { ...newProfile, avatarUrl: serverProfile.avatarUrl };
+          setProfile(merged);
+          localStorage.setItem(profileStorageKey, JSON.stringify(merged));
+        }
+      }).catch(err => {
+        console.warn("[BackendSync User] Warning syncing preferences: ", err);
       });
     }
 

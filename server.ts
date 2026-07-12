@@ -468,8 +468,9 @@ async function persistKieImage(kieUrl: string): Promise<string> {
 }
 
 // Sobe uma foto enviada em base64 (data URL) para o Storage e devolve a URL
-// pública — o kie.ai só aceita referências acessíveis por URL
-async function uploadDataUrlToStorage(dataUrl: string): Promise<string | null> {
+// pública — o kie.ai só aceita referências acessíveis por URL e o banco não
+// deve guardar imagens gigantes em base64
+async function uploadDataUrlToStorage(dataUrl: string, folder: string = "refs"): Promise<string | null> {
   if (!supabaseAdmin) return null;
   const match = dataUrl.match(/^data:(image\/[a-z0-9+.-]+);base64,(.+)$/i);
   if (!match) return null;
@@ -483,7 +484,7 @@ async function uploadDataUrlToStorage(dataUrl: string): Promise<string | null> {
     }
 
     const buffer = Buffer.from(match[2], "base64");
-    const filePath = `refs/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
+    const filePath = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
     const { error } = await supabaseAdmin.storage
       .from(IMAGE_BUCKET)
       .upload(filePath, buffer, { contentType });
@@ -495,6 +496,11 @@ async function uploadDataUrlToStorage(dataUrl: string): Promise<string | null> {
     return null;
   }
 }
+
+// Retrato oficial do Barão usado como referência de rosto nas gerações
+const BARAO_REFERENCE_IMAGE_URL =
+  process.env.BARAO_REFERENCE_IMAGE_URL ||
+  "https://tzybwgiviuotvbknugsc.supabase.co/storage/v1/object/public/imagens/barao.png";
 
 const CONVERSATIONAL_RHYTHM = `
 ════════ HUMANIZE CHAT & MESSAGE DYNAMICS (ULTRA-CRITICAL RULE) ════════
@@ -1698,9 +1704,8 @@ app.post("/api/image/generate", async (req, res) => {
       });
     }
 
-    // Referência 1: retrato oficial do Barão, servido pelo próprio site
-    const baseUrl = (process.env.APP_URL || `https://${req.get("host")}`).replace(/\/$/, "");
-    const baraoPortraitUrl = `${baseUrl}/barao-retrato.png`;
+    // Referência 1: retrato oficial do Barão
+    const baraoPortraitUrl = BARAO_REFERENCE_IMAGE_URL;
 
     // Referência 2: foto de perfil da usuária (base64 vira URL pública)
     let userPhotoUrl: string | null = null;
@@ -2426,6 +2431,15 @@ app.post("/api/profiles/:uid", requireAuth, async (req: AuthRequest, res) => {
       return res.status(404).json({ error: "Usuário não sintonizado." });
     }
 
+    // Foto de perfil enviada em base64 vira arquivo no Storage; no banco
+    // fica somente a URL pública (JSON pequeno e foto permanente)
+    if (typeof profileData?.avatarUrl === "string" && profileData.avatarUrl.startsWith("data:image")) {
+      const uploadedUrl = await uploadDataUrlToStorage(profileData.avatarUrl, "avatars");
+      if (uploadedUrl) {
+        profileData.avatarUrl = uploadedUrl;
+      }
+    }
+
     // Store entire profile object inside fatosBiografia column as JSON
     await db.insert(perfisEditaveis).values({
       usuarioId: userDbId,
@@ -2447,7 +2461,8 @@ app.post("/api/profiles/:uid", requireAuth, async (req: AuthRequest, res) => {
       }).where(eq(usuarios.id, userDbId));
     }
 
-    res.json({ success: true });
+    // Devolve o perfil normalizado (avatarUrl já como URL pública)
+    res.json({ success: true, profile: profileData });
   } catch (error) {
     console.error("[Save Profile] Failed:", error);
     res.status(500).json({ error: "Falha ao salvar perfil." });

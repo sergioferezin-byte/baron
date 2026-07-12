@@ -34,9 +34,11 @@ export function isFirebaseSyncReady(): boolean {
 }
 
 /**
- * Sync user profile with backend 'usuarios' table
+ * Sync user profile with backend 'usuarios' table.
+ * Returns the normalized profile from the server (e.g. avatarUrl converted
+ * from base64 to a permanent public URL), or null on failure.
  */
-export async function syncUserProfile(user: User, localProfileDetails?: any) {
+export async function syncUserProfile(user: User, localProfileDetails?: any): Promise<any | null> {
   try {
     const profileToSave = {
       id: user.id,
@@ -47,13 +49,35 @@ export async function syncUserProfile(user: User, localProfileDetails?: any) {
       tokens: user.tokens,
       ...localProfileDetails
     };
-    await apiFetch(`/api/profiles/${user.id}`, {
+    const res = await apiFetch(`/api/profiles/${user.id}`, {
       method: "POST",
       body: JSON.stringify(profileToSave)
     });
+    if (!res.ok) {
+      console.error("[BackendSync Error] Profile sync rejected:", res.status);
+      return null;
+    }
     console.log("[BackendSync] User profile synced successfully!");
+    const data = await res.json().catch(() => null);
+    return data?.profile || null;
   } catch (error) {
     console.error("[BackendSync Error] Failed to sync user profile:", error);
+    return null;
+  }
+}
+
+/**
+ * Load the user profile stored in the backend (perfis_editaveis), so the
+ * profile — including the photo — follows the user across devices.
+ */
+export async function fetchUserProfile(userId: string): Promise<any | null> {
+  try {
+    const res = await apiFetch(`/api/profiles/${userId}`);
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => null);
+    return data && typeof data === "object" ? data : null;
+  } catch {
+    return null;
   }
 }
 
