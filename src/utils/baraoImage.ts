@@ -11,7 +11,8 @@ export async function requestBaraoImageUrl(
   title: string,
   description: string,
   userPhoto?: string,
-  attachedPhoto?: string
+  attachedPhoto?: string,
+  uid?: string
 ): Promise<string | null> {
   try {
     const createRes = await fetch("/api/image/generate", {
@@ -22,7 +23,9 @@ export async function requestBaraoImageUrl(
         description,
         userPhoto: userPhoto || null,
         // Foto anexada à lembrança: sempre usada como base/referência da cena
-        attachedPhoto: attachedPhoto || null
+        attachedPhoto: attachedPhoto || null,
+        // uid permite ao servidor buscar a foto de perfil no banco de dados
+        uid: uid || null
       })
     });
     const created = await createRes.json().catch(() => null);

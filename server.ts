@@ -502,6 +502,56 @@ const BARAO_REFERENCE_IMAGE_URL =
   process.env.BARAO_REFERENCE_IMAGE_URL ||
   "https://tzybwgiviuotvbknugsc.supabase.co/storage/v1/object/public/imagens/barao.png";
 
+// Aguarda uma tarefa do kie.ai concluir (polling server-side)
+async function waitKieTask(taskId: string, timeoutMs: number = 45000): Promise<string | null> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    await new Promise(resolve => setTimeout(resolve, 2500));
+    const task = await getKieTask(taskId);
+    if (task.state === "success") return task.resultUrls[0] || null;
+    if (task.state === "fail") {
+      console.error("[Kie Wait] Task failed:", task.failMsg);
+      return null;
+    }
+  }
+  console.error("[Kie Wait] Task timed out:", taskId);
+  return null;
+}
+
+// Grava (ou limpa) o retrato personalizado do Barão no perfil da usuária,
+// preservando os demais campos do JSON fatos_biografia
+async function saveBaraoAvatarToProfile(uid: string, url: string | null): Promise<void> {
+  const userDbId = await resolveUserIdByUid(uid);
+  if (!userDbId) return;
+
+  const [prof] = await db.select().from(perfisEditaveis).where(eq(perfisEditaveis.usuarioId, userDbId)).limit(1);
+  let profileJson: any = {};
+  if (prof?.fatosBiografia) {
+    try {
+      profileJson = JSON.parse(prof.fatosBiografia) || {};
+    } catch {
+      profileJson = {};
+    }
+  }
+
+  if (url) {
+    profileJson.baraoAvatarUrl = url;
+  } else {
+    delete profileJson.baraoAvatarUrl;
+  }
+
+  await db.insert(perfisEditaveis).values({
+    usuarioId: userDbId,
+    fatosBiografia: JSON.stringify(profileJson),
+  }).onConflictDoUpdate({
+    target: perfisEditaveis.usuarioId,
+    set: {
+      fatosBiografia: JSON.stringify(profileJson),
+      updatedAt: new Date()
+    }
+  });
+}
+
 const CONVERSATIONAL_RHYTHM = `
 ════════ HUMANIZE CHAT & MESSAGE DYNAMICS (ULTRA-CRITICAL RULE) ════════
 
@@ -1692,7 +1742,7 @@ app.get("/api/voice/status/:taskId", async (req, res) => {
 // os rostos das referências; sem referências, usa o z-image (mais barato).
 app.post("/api/image/generate", async (req, res) => {
   try {
-    const { title, description, userPhoto, attachedPhoto } = req.body;
+    const { title, description, userPhoto, attachedPhoto, uid } = req.body;
     if (!description || typeof description !== "string" || !description.trim()) {
       return res.status(400).json({ error: "description é obrigatória" });
     }
@@ -1704,9 +1754,6 @@ app.post("/api/image/generate", async (req, res) => {
       });
     }
 
-    // Referência 1: retrato oficial do Barão
-    const baraoPortraitUrl = BARAO_REFERENCE_IMAGE_URL;
-
     // Normaliza uma foto recebida (base64 vira URL pública no Storage)
     const resolvePhotoUrl = async (photo: unknown): Promise<string | null> => {
       if (!photo || typeof photo !== "string") return null;
@@ -1715,86 +1762,110 @@ app.post("/api/image/generate", async (req, res) => {
       return null;
     };
 
-    // Foto ANEXADA à lembrança: sempre entra como referência (a cena é
-    // recriada a partir dela). Sem anexo, vale a foto de perfil, que o
-    // DeepSeek decide incluir conforme a lembrança.
+    // Perfil guardado no banco: traz a foto da usuária e o retrato
+    // personalizado do Barão (baraoAvatarUrl), quando existirem
+    let profileJson: any = null;
+    if (uid) {
+      try {
+        const userDbId = await resolveUserIdByUid(String(uid));
+        if (userDbId) {
+          const [prof] = await db.select().from(perfisEditaveis).where(eq(perfisEditaveis.usuarioId, userDbId)).limit(1);
+          if (prof?.fatosBiografia) {
+            profileJson = JSON.parse(prof.fatosBiografia);
+          }
+        }
+      } catch (profErr) {
+        console.warn("[Image Generate] Falha ao buscar perfil no banco:", profErr);
+      }
+    }
+
+    // Referência 1: retrato do Barão — o personalizado da usuária (salvo no
+    // banco) tem prioridade sobre o retrato oficial padrão
+    const customBaraoUrl =
+      typeof profileJson?.baraoAvatarUrl === "string" && profileJson.baraoAvatarUrl.startsWith("http")
+        ? profileJson.baraoAvatarUrl
+        : null;
+    const baraoPortraitUrl = customBaraoUrl || BARAO_REFERENCE_IMAGE_URL;
+
+    // Foto ANEXADA à lembrança: quando existe, é a base da cena
     const attachedPhotoUrl = await resolvePhotoUrl(attachedPhoto);
-    const profilePhotoUrl = attachedPhotoUrl ? null : await resolvePhotoUrl(userPhoto);
-    const userPhotoUrl = attachedPhotoUrl || profilePhotoUrl;
     const isAttached = !!attachedPhotoUrl;
 
+    // Sem anexo: foto de perfil enviada pelo navegador ou, na falta dela,
+    // a foto de perfil guardada no banco de dados (funciona em qualquer aparelho)
+    let profilePhotoUrl = isAttached ? null : await resolvePhotoUrl(userPhoto);
+    if (!isAttached && !profilePhotoUrl && profileJson) {
+      profilePhotoUrl = await resolvePhotoUrl(profileJson?.avatarUrl);
+    }
+
+    const userPhotoUrl = attachedPhotoUrl || profilePhotoUrl;
     const mentionsBarao = /bar[aã]o/i.test(`${title || ""} ${description}`);
 
-    // Decisão reserva caso o DeepSeek esteja indisponível.
+    // Regras de referência:
+    // - Com foto anexada: ela é a base; o Barão entra se for mencionado.
+    // - Sem foto anexada: retrato do Barão + foto de perfil (quando houver)
+    //   entram SEMPRE como referências da cena.
+    const includeBarao = isAttached ? mentionsBarao : true;
+    const includeUser = isAttached ? true : !!profilePhotoUrl;
+
+    // Descrição das referências que serão anexadas (para o prompt saber
+    // exatamente quem aparece na cena)
+    const refLines: string[] = [];
+    if (includeBarao) {
+      refLines.push(`Reference image ${refLines.length + 1}: portrait of the Barão (the user's male companion) — he MUST appear in the scene and his face must match this reference exactly; do not invent his appearance.`);
+    }
+    if (includeUser && userPhotoUrl) {
+      refLines.push(
+        isAttached
+          ? `Reference image ${refLines.length + 1}: a photo ATTACHED by the user showing this memory — recreate the scene based on it, keeping the people, their faces and the key elements faithful, adapting the setting to the memory description.`
+          : `Reference image ${refLines.length + 1}: the user's profile photo — she MUST appear in the scene and her face must match this reference exactly.`
+      );
+    }
+
+    // Prompt reserva caso o DeepSeek esteja indisponível.
     // Importante: nunca colocar o título no prompt — modelos tendem a
     // escrever palavras citadas como texto dentro da imagem.
-    const fallbackPlan = () => {
-      let refsPart = "";
-      if (mentionsBarao && userPhotoUrl) {
-        refsPart = "The scene features the man from reference image 1 and the woman from reference image 2; their faces must match the reference photos exactly. ";
-      } else if (mentionsBarao) {
-        refsPart = "The scene features the man from the reference image; his face must match the reference photo exactly. ";
-      } else if (userPhotoUrl) {
-        refsPart = "The scene features the person from the reference image; their face must match the reference photo exactly. ";
-      }
-      return {
-        prompt: (
-          `Ultra-realistic photograph shot on a professional full-frame camera, 50mm lens, natural skin texture, warm golden natural light, cozy intimate atmosphere, shallow depth of field. Absolutely not a painting, illustration or drawing. The image contains no text, letters, captions or typography of any kind. ` +
-          refsPart +
-          `Scene: ${String(description)}`
-        ).slice(0, 990),
-        includeBarao: mentionsBarao,
-        includeUser: isAttached || !!userPhotoUrl
-      };
-    };
+    const fallbackPrompt = () => (
+      `Ultra-realistic photograph shot on a professional full-frame camera, 50mm lens, natural skin texture, warm golden natural light, cozy intimate atmosphere, shallow depth of field. Absolutely not a painting, illustration or drawing. The image contains no text, letters, captions or typography of any kind. ` +
+      (refLines.length > 0 ? `The people from the reference images appear in the scene with their faces kept exactly as in the references. ` : "") +
+      `Scene: ${String(description)}`
+    ).slice(0, 990);
 
-    // O DeepSeek lê a lembrança (PT), decide quais referências entram na cena
-    // e escreve um prompt fotográfico fiel em inglês (o que os modelos de
-    // imagem entendem melhor)
-    let plan = fallbackPlan();
+    // O DeepSeek lê a lembrança (PT) e escreve um prompt fotográfico fiel em
+    // inglês (o que os modelos de imagem entendem melhor)
+    let prompt = fallbackPrompt();
     try {
       const crafted = await callDeepSeek(
         [
           {
             role: "system",
             content:
-              `You prepare inputs for a photorealistic image generation model. You receive a personal memory (title and description in Portuguese) and which reference photos are available. Reply ONLY with minified JSON in this exact shape: {"prompt":"...","includeBarao":true,"includeUser":false}.\n` +
-              `Rules for "prompt" (ENGLISH, max 850 characters): describe ONE photographic scene that faithfully depicts the concrete elements of the memory — places, objects, people, weather, time of day and mood. Style words to always include: "ultra-realistic photograph shot on a professional full-frame camera, 50mm lens, natural skin texture, warm golden natural light, cozy intimate atmosphere, shallow depth of field" and "absolutely not a painting, illustration or drawing".\n` +
+              `You write prompts in ENGLISH for a photorealistic image generation model. You receive a personal memory (title and description in Portuguese) and the list of reference photos that WILL be attached to the generation.\n` +
+              `Write ONE prompt (max 850 characters) describing a single photographic scene that faithfully depicts the concrete elements of the memory — places, objects, people, weather, time of day and mood. Style words to always include: "ultra-realistic photograph shot on a professional full-frame camera, 50mm lens, natural skin texture, warm golden natural light, cozy intimate atmosphere, shallow depth of field" and "absolutely not a painting, illustration or drawing".\n` +
+              `Every person listed in the references MUST appear in the scene; refer to them by their reference image number and state that their faces must match the references exactly.\n` +
               `The image must never contain text: state that no text, letters, captions or typography appear in the image. NEVER write the memory title in the prompt and NEVER put any words in quotation marks — quoted words get rendered as text inside the image.\n` +
-              `"includeBarao": true only if the memory mentions "Barão" (the user's male AI companion). His portrait will be attached as reference image 1 — refer to him in the prompt as "the man from reference image 1" and say his face must match the reference exactly; do not invent his appearance.\n` +
-              `"includeUser": true only if a user photo is available AND the memory implies the user herself appears in the scene (first-person presence, e.g. "eu", "nós", "comigo"). Her photo will be attached as the next reference image — refer to her as "the woman from the user reference photo" and say her face must match the reference exactly.\n` +
-              `EXCEPTION: if the user photo is marked as ATTACHED to this memory, "includeUser" MUST be true and the scene must be recreated based on that photo — keep the people, their faces and the key elements of the attached photo faithful, adapting the setting to the memory description.\n` +
-              `If a reference is not included, do not mention it in the prompt.`
+              `Reply with the prompt only, no quotes or explanations.`
           },
           {
             role: "user",
             content:
               `Título: ${title || "(sem título)"}\n` +
               `Descrição da lembrança: ${description}\n` +
-              `Foto do Barão disponível: sim\n` +
-              `Foto da usuária disponível: ${userPhotoUrl ? (isAttached ? "sim — ANEXADA a esta lembrança (deve ser a base da cena)" : "sim (foto de perfil)") : "não"}`
+              `Referências que serão anexadas:\n${refLines.length > 0 ? refLines.join("\n") : "(nenhuma — cena sem pessoas conhecidas)"}`
           }
         ],
         { temperature: 0.3 }
       );
-      const jsonText = crafted.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
-      const parsed = JSON.parse(jsonText);
-      if (parsed && typeof parsed.prompt === "string" && parsed.prompt.trim()) {
-        plan = {
-          prompt: parsed.prompt.trim().slice(0, 990),
-          includeBarao: !!parsed.includeBarao,
-          // Foto anexada à lembrança sempre entra como referência
-          includeUser: isAttached || (!!parsed.includeUser && !!userPhotoUrl)
-        };
-      }
+      const cleaned = crafted.trim().replace(/^```(?:\w+)?/i, "").replace(/```$/, "").trim();
+      if (cleaned) prompt = cleaned.slice(0, 990);
     } catch (promptErr) {
-      console.warn("[Image Generate] DeepSeek plan unavailable, using fallback:", promptErr);
+      console.warn("[Image Generate] DeepSeek prompt unavailable, using fallback:", promptErr);
     }
 
     // Monta as referências na ordem combinada: Barão primeiro, usuária depois
     const imageInput: string[] = [];
-    if (plan.includeBarao) imageInput.push(baraoPortraitUrl);
-    if (plan.includeUser && userPhotoUrl) imageInput.push(userPhotoUrl);
+    if (includeBarao) imageInput.push(baraoPortraitUrl);
+    if (includeUser && userPhotoUrl) imageInput.push(userPhotoUrl);
 
     // Com referências: nano-banana-2 (preserva rostos). Sem: z-image (barato)
     let taskId: string;
@@ -1802,7 +1873,7 @@ app.post("/api/image/generate", async (req, res) => {
     if (imageInput.length > 0) {
       usedModel = "nano-banana-2";
       taskId = await createKieTask(usedModel, {
-        prompt: plan.prompt,
+        prompt: prompt,
         image_input: imageInput,
         aspect_ratio: "4:3",
         resolution: "1K",
@@ -1811,13 +1882,13 @@ app.post("/api/image/generate", async (req, res) => {
     } else {
       usedModel = "z-image";
       taskId = await createKieTask(usedModel, {
-        prompt: plan.prompt,
+        prompt: prompt,
         aspect_ratio: "4:3"
       });
     }
 
     // model/prompt/refs ajudam a diagnosticar gerações fora do esperado
-    res.json({ taskId, model: usedModel, refs: imageInput.length, prompt: plan.prompt });
+    res.json({ taskId, model: usedModel, refs: imageInput.length, prompt: prompt });
   } catch (error: any) {
     console.error("[Image Generate] Failed:", error);
     res.status(500).json({
@@ -1874,13 +1945,52 @@ app.get("/api/image/status/:taskId", async (req, res) => {
   }
 });
 
-app.post("/api/barao/generate-avatar", (req, res) => {
+// Gera um novo retrato do Barão por IA (kie.ai + nano-banana-2), mantendo a
+// identidade do retrato oficial e aplicando o estilo pedido pela usuária.
+// O resultado é salvo no Storage e gravado no perfil (baraoAvatarUrl) —
+// vira o retrato padrão do Barão para essa usuária em todo o app.
+app.post("/api/barao/generate-avatar", async (req, res) => {
   try {
-    const { prompt } = req.body;
+    const { prompt, uid } = req.body;
     if (!prompt) {
       return res.status(400).json({ error: "Prompt is required" });
     }
 
+    if (process.env.KIE_API_KEY) {
+      const avatarPrompt = (
+        `Ultra-realistic portrait photograph of the same man from the reference image — keep his face, identity and warm gaze exactly consistent with the reference. ` +
+        `Apply this new styling/appearance request from the user (may be written in Portuguese): ${String(prompt).slice(0, 400)}. ` +
+        `Setting: dark moody backdrop with warm golden cinematic light, elegant attire. Shot on a professional full-frame camera, 50mm lens, natural skin texture, shallow depth of field. ` +
+        `Absolutely not a painting, illustration or drawing. No text, letters or typography in the image.`
+      ).slice(0, 990);
+
+      const taskId = await createKieTask("nano-banana-2", {
+        prompt: avatarPrompt,
+        image_input: [BARAO_REFERENCE_IMAGE_URL],
+        aspect_ratio: "3:4",
+        resolution: "1K",
+        output_format: "png"
+      });
+
+      const kieUrl = await waitKieTask(taskId, 45000);
+      if (!kieUrl) {
+        return res.status(500).json({ error: "A forja do novo semblante falhou ou demorou demais. Tente novamente." });
+      }
+
+      // Persiste no Storage (URLs do kie.ai expiram em 24h)
+      const avatarUrl = await persistKieMedia(kieUrl, IMAGE_BUCKET, "barao", "image/png", "png");
+
+      // Grava no banco como retrato padrão do Barão desta usuária
+      if (uid) {
+        await saveBaraoAvatarToProfile(String(uid), avatarUrl).catch(err => {
+          console.error("[Barao Avatar] Falha ao gravar no perfil:", err);
+        });
+      }
+
+      return res.json({ avatarUrl });
+    }
+
+    // Sem KIE_API_KEY: fallback com retratos fixos (comportamento antigo)
     const norm = prompt.toLowerCase();
     
     // Premium, hand-curated, highly aesthetic photographic male portraits from Unsplash
@@ -1923,6 +2033,38 @@ app.post("/api/barao/generate-avatar", (req, res) => {
   } catch (error: any) {
     console.error("Failed to generate avatar:", error);
     res.status(500).json({ error: "Failed to model avatar" });
+  }
+});
+
+// Salva no banco um retrato do Barão enviado pela usuária (ou limpa com reset)
+app.post("/api/barao/avatar", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const { uid, dataUrl, reset } = req.body;
+    if (!uid) return res.status(400).json({ error: "uid é obrigatório" });
+    if (!ownsUid(req, uid)) {
+      return res.status(403).json({ error: "Acesso negado." });
+    }
+
+    if (reset) {
+      await saveBaraoAvatarToProfile(uid, null);
+      return res.json({ success: true, avatarUrl: null });
+    }
+
+    let avatarUrl: string | null = null;
+    if (typeof dataUrl === "string" && dataUrl.startsWith("data:image")) {
+      avatarUrl = await uploadDataUrlToStorage(dataUrl, "barao");
+    } else if (typeof dataUrl === "string" && dataUrl.startsWith("http")) {
+      avatarUrl = dataUrl;
+    }
+    if (!avatarUrl) {
+      return res.status(400).json({ error: "Imagem inválida." });
+    }
+
+    await saveBaraoAvatarToProfile(uid, avatarUrl);
+    res.json({ success: true, avatarUrl });
+  } catch (error: any) {
+    console.error("[Barao Avatar] Failed:", error);
+    res.status(500).json({ error: "Erro ao salvar o retrato do Barão." });
   }
 });
 
@@ -2467,6 +2609,20 @@ app.post("/api/profiles/:uid", requireAuth, async (req: AuthRequest, res) => {
       if (uploadedUrl) {
         profileData.avatarUrl = uploadedUrl;
       }
+    }
+
+    // Preserva o retrato personalizado do Barão já gravado — o painel de
+    // perfil não envia esse campo e não deve apagá-lo
+    if (profileData && profileData.baraoAvatarUrl === undefined) {
+      try {
+        const [existingProf] = await db.select().from(perfisEditaveis).where(eq(perfisEditaveis.usuarioId, userDbId)).limit(1);
+        if (existingProf?.fatosBiografia) {
+          const existingJson = JSON.parse(existingProf.fatosBiografia);
+          if (existingJson?.baraoAvatarUrl) {
+            profileData.baraoAvatarUrl = existingJson.baraoAvatarUrl;
+          }
+        }
+      } catch {}
     }
 
     // Store entire profile object inside fatosBiografia column as JSON

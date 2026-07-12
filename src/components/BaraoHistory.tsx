@@ -21,7 +21,10 @@ import {
   HelpCircle, 
   Image as ImageIcon,
   ChevronRight,
-  X
+  X,
+  Contrast,
+  ZoomIn,
+  Download
 } from "lucide-react";
 
 import BaraoPaywall from "./BaraoPaywall";
@@ -57,7 +60,9 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
   // Core state
   const [historyList, setHistoryList] = useState<HistoryEntry[]>([]);
   const [isFeatureEnabled, setIsFeatureEnabled] = useState<boolean>(true);
-  const [isMonochrome, setIsMonochrome] = useState<boolean>(true);
+  // Filtro P&B individual: mapa por id da lembrança (padrão: ligado)
+  const [monoMap, setMonoMap] = useState<Record<string, boolean>>({});
+  const [expandedImage, setExpandedImage] = useState<{ url: string; title: string } | null>(null);
   
   // Custom creator states
   const [isCreatorOpen, setIsCreatorOpen] = useState(false);
@@ -87,9 +92,14 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
       setIsFeatureEnabled(true);
     }
 
-    // 1.5 Monochrome filter preference (padrão: ligado, o visual original)
-    const savedMono = localStorage.getItem(monoFilterKey);
-    setIsMonochrome(savedMono === null ? true : savedMono === "true");
+    // 1.5 Monochrome filter preferences per photo (padrão: ligado)
+    try {
+      const savedMono = localStorage.getItem(monoFilterKey);
+      const parsedMono = savedMono ? JSON.parse(savedMono) : {};
+      setMonoMap(parsedMono && typeof parsedMono === "object" ? parsedMono : {});
+    } catch {
+      setMonoMap({});
+    }
 
     // 2. Load History entries
     const savedEntries = localStorage.getItem(historyStorageKey);
@@ -121,11 +131,33 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
     localStorage.setItem(featureToggleKey, String(newVal));
   };
 
-  // Handle Monochrome filter toggle
-  const handleToggleMonochrome = () => {
-    const newVal = !isMonochrome;
-    setIsMonochrome(newVal);
-    localStorage.setItem(monoFilterKey, String(newVal));
+  // Toggle do filtro P&B de uma foto específica
+  const toggleMonoForEntry = (entryId: string) => {
+    setMonoMap(prev => {
+      const next = { ...prev, [entryId]: !(prev[entryId] ?? true) };
+      localStorage.setItem(monoFilterKey, JSON.stringify(next));
+      return next;
+    });
+  };
+
+  // Baixa a foto de uma lembrança (funciona para URLs do Storage e base64)
+  const downloadEntryImage = async (url: string, title: string) => {
+    const fileName = "lembranca-" + (title || "barao").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) + ".jpg";
+    try {
+      const res = await fetch(url);
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(objectUrl);
+    } catch {
+      // Plano B: abre em nova aba para salvar manualmente
+      window.open(url, "_blank");
+    }
   };
 
   // Process and convert image uploads to base64
@@ -271,7 +303,8 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
         finalTitle,
         finalDesc,
         userPhoto,
-        attachedPhotoUrl || uploadedBase64 || undefined
+        attachedPhotoUrl || uploadedBase64 || undefined,
+        currentUser?.id
       );
 
       if (paintedUrl) {
@@ -377,59 +410,31 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
           </p>
         </div>
 
-        {/* Configurations Toggles (Geometric Pills) */}
-        <div className="flex flex-col gap-2 self-stretch md:self-auto shrink-0">
-          <div className="flex items-center gap-3 justify-between bg-black/60 p-3 rounded-sm border border-white/5">
-            <div className="flex items-center gap-2">
-              <Sliders className="h-4 w-4 text-barao-rose shrink-0" />
-              <div className="text-left leading-none">
-                <span className="block text-[9px] uppercase font-mono tracking-wider font-bold text-white">
-                  Álbum Ativado
-                </span>
-                <span className="text-[8px] font-serif italic text-zinc-500">
-                  {isFeatureEnabled ? "Exibindo retratos" : "Oculto dos olhos do mundo"}
-                </span>
-              </div>
+        {/* Configurations Toggle (Geometric Pill) */}
+        <div className="flex items-center gap-3 self-stretch md:self-auto justify-between bg-black/60 p-3 rounded-sm border border-white/5 shrink-0">
+          <div className="flex items-center gap-2">
+            <Sliders className="h-4 w-4 text-barao-rose shrink-0" />
+            <div className="text-left leading-none">
+              <span className="block text-[9px] uppercase font-mono tracking-wider font-bold text-white">
+                Álbum Ativado
+              </span>
+              <span className="text-[8px] font-serif italic text-zinc-500">
+                {isFeatureEnabled ? "Exibindo retratos" : "Oculto dos olhos do mundo"}
+              </span>
             </div>
-            <button
-              onClick={handleToggleFeature}
-              className={`relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                isFeatureEnabled ? "bg-barao-rose" : "bg-zinc-850"
-              }`}
-            >
-              <span
-                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-black shadow ring-0 transition duration-200 ease-in-out ${
-                  isFeatureEnabled ? "translate-x-5" : "translate-x-0"
-                }`}
-              />
-            </button>
           </div>
-
-          <div className="flex items-center gap-3 justify-between bg-black/60 p-3 rounded-sm border border-white/5">
-            <div className="flex items-center gap-2">
-              <ImageIcon className="h-4 w-4 text-barao-rose shrink-0" />
-              <div className="text-left leading-none">
-                <span className="block text-[9px] uppercase font-mono tracking-wider font-bold text-white">
-                  Filtro Preto e Branco
-                </span>
-                <span className="text-[8px] font-serif italic text-zinc-500">
-                  {isMonochrome ? "Retratos em tons clássicos" : "Retratos em cores vivas"}
-                </span>
-              </div>
-            </div>
-            <button
-              onClick={handleToggleMonochrome}
-              className={`relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                isMonochrome ? "bg-barao-rose" : "bg-zinc-850"
+          <button
+            onClick={handleToggleFeature}
+            className={`relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+              isFeatureEnabled ? "bg-barao-rose" : "bg-zinc-850"
+            }`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-black shadow ring-0 transition duration-200 ease-in-out ${
+                isFeatureEnabled ? "translate-x-5" : "translate-x-0"
               }`}
-            >
-              <span
-                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-black shadow ring-0 transition duration-200 ease-in-out ${
-                  isMonochrome ? "translate-x-5" : "translate-x-0"
-                }`}
-              />
-            </button>
-          </div>
+            />
+          </button>
         </div>
       </div>
 
@@ -648,6 +653,7 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
             <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
               {historyList.map((item) => {
                 const isItemRegenerating = weavingDayId === item.id;
+                const isItemMono = monoMap[item.id] ?? true;
                 return (
                   <div 
                     key={item.id}
@@ -663,7 +669,7 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
                         alt={item.title}
                         referrerPolicy="no-referrer"
                         className={`h-full w-full object-cover transition duration-700 ${
-                          isMonochrome ? "grayscale brightness-95 filter group-hover:grayscale-0" : ""
+                          isItemMono ? "grayscale brightness-95 filter group-hover:grayscale-0" : ""
                         }`}
                       />
 
@@ -672,6 +678,33 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
                         <span className="px-2 py-0.5 rounded-sm bg-black/80 backdrop-blur-sm border border-white/5 text-[8.5px] font-mono uppercase tracking-wider text-zinc-450">
                           Momento Guardado
                         </span>
+                      </div>
+
+                      {/* Per-photo actions: P&B, ampliar e baixar */}
+                      <div className="absolute top-3 right-3 z-20 flex gap-1.5">
+                        <button
+                          onClick={() => toggleMonoForEntry(item.id)}
+                          title={isItemMono ? "Mostrar em cores" : "Mostrar em preto e branco"}
+                          className={`h-7 w-7 flex items-center justify-center rounded-sm bg-black/80 backdrop-blur-sm border transition ${
+                            isItemMono ? "border-white/10 text-zinc-400 hover:text-white" : "border-barao-rose/40 text-barao-rose"
+                          }`}
+                        >
+                          <Contrast className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          onClick={() => setExpandedImage({ url: item.imageUrl, title: item.title })}
+                          title="Ampliar foto"
+                          className="h-7 w-7 flex items-center justify-center rounded-sm bg-black/80 backdrop-blur-sm border border-white/10 text-zinc-400 hover:text-white transition"
+                        >
+                          <ZoomIn className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          onClick={() => downloadEntryImage(item.imageUrl, item.title)}
+                          title="Baixar foto"
+                          className="h-7 w-7 flex items-center justify-center rounded-sm bg-black/80 backdrop-blur-sm border border-white/10 text-zinc-400 hover:text-white transition"
+                        >
+                          <Download className="h-3.5 w-3.5" />
+                        </button>
                       </div>
 
                       {/* Title & metadata bottom visual elements */}
@@ -735,6 +768,40 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
               })}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Visualizador de foto ampliada */}
+      {expandedImage && (
+        <div
+          className="fixed inset-0 z-50 bg-black/95 backdrop-blur-sm flex items-center justify-center p-4 md:p-10 animate-fade-in"
+          onClick={() => setExpandedImage(null)}
+        >
+          <button
+            onClick={() => setExpandedImage(null)}
+            title="Fechar"
+            className="absolute top-4 right-4 h-9 w-9 flex items-center justify-center rounded-sm bg-black/80 border border-white/10 text-zinc-300 hover:text-white transition z-10"
+          >
+            <X className="h-4 w-4" />
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); downloadEntryImage(expandedImage.url, expandedImage.title); }}
+            title="Baixar foto"
+            className="absolute top-4 right-16 h-9 w-9 flex items-center justify-center rounded-sm bg-black/80 border border-white/10 text-zinc-300 hover:text-white transition z-10"
+          >
+            <Download className="h-4 w-4" />
+          </button>
+          <figure className="max-h-full max-w-full text-center" onClick={(e) => e.stopPropagation()}>
+            <img
+              src={expandedImage.url}
+              alt={expandedImage.title}
+              referrerPolicy="no-referrer"
+              className="max-h-[85vh] max-w-full object-contain rounded-sm border border-white/10 shadow-2xl"
+            />
+            <figcaption className="mt-3 font-serif text-sm text-zinc-300 italic">
+              {expandedImage.title}
+            </figcaption>
+          </figure>
         </div>
       )}
     </div>

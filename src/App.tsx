@@ -23,7 +23,7 @@ import MeuBarao from "./components/MeuBarao"; // Import customized Baron managem
 import BaraoAdminDashboard from "./components/BaraoAdminDashboard"; // Import modular admin control panel
 import baraoBackground from "./assets/images/barao_portrait_1779931788412.png";
 import { supabase } from "./lib/supabase";
-import { apiFetch } from "./utils/supabaseSync";
+import { apiFetch, fetchUserProfile } from "./utils/supabaseSync";
 
 type ActiveTab = "home" | "dialogo" | "refugio" | "universo" | "evolucao" | "meubarao" | "privacy" | "terms" | "admin";
 
@@ -98,7 +98,19 @@ export default function App() {
   // Keep O Barão's portrait in sync on account changes
   useEffect(() => {
     const id = currentUser ? currentUser.id : "guest";
-    setBaronAvatar(localStorage.getItem(`mb_custom_barao_avatar_${id}`) || "");
+    const localAvatar = localStorage.getItem(`mb_custom_barao_avatar_${id}`) || "";
+    setBaronAvatar(localAvatar);
+
+    // Restaura o retrato personalizado do Barão salvo no banco quando este
+    // navegador não tem cópia local (troca de aparelho, cache limpo etc.)
+    if (currentUser && !localAvatar) {
+      fetchUserProfile(currentUser.id).then(profile => {
+        if (profile?.baraoAvatarUrl && typeof profile.baraoAvatarUrl === "string") {
+          setBaronAvatar(profile.baraoAvatarUrl);
+          localStorage.setItem(`mb_custom_barao_avatar_${id}`, profile.baraoAvatarUrl);
+        }
+      }).catch(() => {});
+    }
   }, [currentUser]);
 
   useEffect(() => {

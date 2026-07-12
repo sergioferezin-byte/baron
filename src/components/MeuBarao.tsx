@@ -6,6 +6,8 @@ import {
 } from "lucide-react";
 import { User } from "../types";
 import { renderAvatarSvgOrImg } from "../utils/avatar";
+import { apiFetch } from "../utils/supabaseSync";
+import { compressImageFile } from "../utils/imageCompress";
 
 // Import default fallback image
 import baraoBackgroundFallback from "../assets/images/barao_portrait_1779931788412.png";
@@ -251,33 +253,53 @@ export default function MeuBarao({
     }
 
     setIsUploading(true);
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const base64Str = event.target?.result as string;
-      setTempFileBase64(base64Str);
+    // Comprime no navegador (limites de envio da Vercel: 4,5MB)
+    compressImageFile(file, 1024).then(compressed => {
+      setTempFileBase64(compressed);
       setIsUploading(false);
-    };
-    reader.onerror = () => {
+    }).catch(() => {
       alert("Falha ao processar o arquivo de imagem.");
       setIsUploading(false);
-    };
-    reader.readAsDataURL(file);
+    });
   };
 
-  // Confirm face replacement
-  const handleApplyCustomPortrait = () => {
+  // Confirm face replacement — salva no banco para ser o retrato padrão sempre
+  const handleApplyCustomPortrait = async () => {
     if (!tempFileBase64) return;
-    onBaronAvatarChange(tempFileBase64);
-    localStorage.setItem(`mb_custom_barao_avatar_${currentUser?.id || "guest"}`, tempFileBase64);
+
+    let finalUrl = tempFileBase64;
+    if (currentUser) {
+      try {
+        const res = await apiFetch("/api/barao/avatar", {
+          method: "POST",
+          body: JSON.stringify({ uid: currentUser.id, dataUrl: tempFileBase64 })
+        });
+        const data = await res.json().catch(() => null);
+        if (res.ok && data?.avatarUrl) {
+          finalUrl = data.avatarUrl;
+        }
+      } catch (err) {
+        console.warn("[Barao Avatar] Falha ao salvar no banco; mantendo cópia local:", err);
+      }
+    }
+
+    onBaronAvatarChange(finalUrl);
+    localStorage.setItem(`mb_custom_barao_avatar_${currentUser?.id || "guest"}`, finalUrl);
     setTempFileBase64(null);
     triggerFeedback("Fisionomia de O Barão atualizada no abrigo!");
   };
 
-  // Clear/Reset back to original
+  // Clear/Reset back to original — limpa também o retrato salvo no banco
   const handleResetPortrait = () => {
     onBaronAvatarChange("");
     localStorage.removeItem(`mb_custom_barao_avatar_${currentUser?.id || "guest"}`);
     setTempFileBase64(null);
+    if (currentUser) {
+      apiFetch("/api/barao/avatar", {
+        method: "POST",
+        body: JSON.stringify({ uid: currentUser.id, reset: true })
+      }).catch(() => {});
+    }
     triggerFeedback("Sua fisionomia retornou ao retrato clássico de O Barão.");
   };
 
@@ -294,7 +316,8 @@ export default function MeuBarao({
       const response = await fetch("/api/barao/generate-avatar", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: promptInput })
+        // uid: o servidor grava o retrato gerado no perfil (padrão permanente)
+        body: JSON.stringify({ prompt: promptInput, uid: currentUser?.id || null })
       });
 
       if (!response.ok) {
