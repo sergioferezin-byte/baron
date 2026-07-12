@@ -13,9 +13,17 @@ export async function requestBaraoImageUrl(title: string, description: string): 
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title, description })
     });
-    if (!createRes.ok) return null;
+    const created = await createRes.json().catch(() => null);
 
-    const created = await createRes.json();
+    if (!createRes.ok) {
+      // Créditos do kie.ai esgotados: avisa com clareza em vez de falhar em silêncio
+      const detail = String(created?.detail || "");
+      if (detail.includes("Credits insufficient") || detail.includes("\"code\":402")) {
+        throw new Error("Os créditos da conta kie.ai se esgotaram. Recarregue o saldo em kie.ai para que o Barão volte a pintar imagens e falar com voz realista.");
+      }
+      return null;
+    }
+
     if (!created?.taskId) return null;
 
     // Z-Image costuma ficar pronto em poucos segundos; espera até ~60s
@@ -30,7 +38,9 @@ export async function requestBaraoImageUrl(title: string, description: string): 
       if (status.state === "fail") return null;
     }
     return null;
-  } catch {
+  } catch (err) {
+    // Erros com mensagem clara para a usuária (ex.: créditos esgotados) sobem para a tela
+    if (err instanceof Error && err.message.includes("kie.ai")) throw err;
     return null;
   }
 }

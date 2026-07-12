@@ -356,7 +356,9 @@ async function callDeepSeek(
 // Tarefas são assíncronas: createTask devolve um taskId e o resultado é
 // consultado em recordInfo até ficar pronto.
 const KIE_API_BASE = "https://api.kie.ai/api/v1";
-const KIE_TTS_MODEL = "elevenlabs/text-to-speech-multilingual-v2";
+// Turbo 2.5: mesmas vozes da multilingual-v2 pela metade do preço, com
+// enforcement de idioma (pt). Troque via KIE_TTS_MODEL se quiser outra.
+const KIE_TTS_MODEL = process.env.KIE_TTS_MODEL || "elevenlabs/text-to-speech-turbo-2-5";
 // Voz padrão: "Hank — Deep and Engaging Narrator". Troque via KIE_TTS_VOICE.
 const KIE_TTS_VOICE = process.env.KIE_TTS_VOICE || "6F5Zhi321D3Oq7v1oNT4";
 
@@ -1608,7 +1610,8 @@ app.post("/api/voice/speak", async (req, res) => {
       voice: KIE_TTS_VOICE,
       stability: 0.5,
       similarity_boost: 0.75,
-      speed: 0.92
+      speed: 0.92,
+      language_code: "pt"
     });
 
     res.json({ taskId });
