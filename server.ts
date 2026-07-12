@@ -2882,24 +2882,42 @@ app.get("/api/albums", requireAuth, async (req: AuthRequest, res) => {
     if (!userDbId) return res.json([]);
 
     const list = await db.select().from(albumEmocional).where(eq(albumEmocional.usuarioId, userDbId)).orderBy(desc(albumEmocional.createdAt));
-    res.json(list.map(a => {
+    const mapped = await Promise.all(list.map(async a => {
       // Decode fields encoded inside descricaoMomento or cronicaPoetica if any
-      let parsed = { imageUrl: null, prompt: "" };
+      let parsed: { imageUrl: string | null; prompt: string } = { imageUrl: null, prompt: "" };
       try {
         if (a.descricaoMomento && a.descricaoMomento.startsWith("{")) {
           parsed = JSON.parse(a.descricaoMomento);
         }
       } catch {}
 
+      // Migração automática: linhas antigas guardaram a foto inteira em
+      // base64 dentro do banco — isso estoura o limite de 4,5MB de resposta
+      // da Vercel e derruba a sincronização inteira. Converte para arquivo
+      // no Storage e regrava a linha com a URL leve.
+      let imageUrl = parsed.imageUrl || null;
+      if (imageUrl && imageUrl.startsWith("data:image")) {
+        const hosted = await uploadDataUrlToStorage(imageUrl, "album");
+        imageUrl = hosted;
+        try {
+          await db.update(albumEmocional).set({
+            descricaoMomento: JSON.stringify({ prompt: parsed.prompt || "", imageUrl: hosted })
+          }).where(eq(albumEmocional.id, a.id));
+        } catch (migErr) {
+          console.error("[Get Albums] Falha ao migrar imagem base64 da linha", a.id, migErr);
+        }
+      }
+
       return {
         id: a.id,
         title: a.tituloMomento,
         description: parsed.prompt || a.descricaoMomento,
         story: a.cronicaPoetica,
-        imageUrl: parsed.imageUrl || null,
+        imageUrl,
         createdAt: a.createdAt
       };
     }));
+    res.json(mapped);
   } catch (error) {
     console.error("[Get Albums] Failed:", error);
     res.status(500).json({ error: "Erro ao carregar histórias." });
@@ -2919,8 +2937,15 @@ app.post("/api/albums", requireAuth, async (req: AuthRequest, res) => {
     const userDbId = await resolveUserIdByUid(uid);
     if (!userDbId) return res.status(404).json({ error: "Usuário não sintonizado." });
 
+    // Foto em base64 nunca entra no banco: vira arquivo no Storage e a
+    // linha guarda apenas a URL (mantém a listagem leve)
+    let finalImageUrl = imageUrl || null;
+    if (typeof finalImageUrl === "string" && finalImageUrl.startsWith("data:image")) {
+      finalImageUrl = await uploadDataUrlToStorage(finalImageUrl, "album");
+    }
+
     // Store extra fields like image_url in a compact JSON string inside description
-    const descData = JSON.stringify({ prompt: description, imageUrl });
+    const descData = JSON.stringify({ prompt: description, imageUrl: finalImageUrl });
     const safeTitle = String(title).slice(0, 155); // limite da coluna titulo_momento
 
     // Upsert por (usuário, título): sincronizações concorrentes atualizam a

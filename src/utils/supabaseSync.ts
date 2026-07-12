@@ -221,15 +221,34 @@ export async function syncHistoryEntries(userId: string, localHistories: History
       dedupedLocal.push(local);
     }
 
-    // 1. Get existing from backend
-    const res = await apiFetch(`/api/albums?uid=${userId}`);
-    if (!res.ok) throw new Error("Failed to load album history");
-    const cloudList: CloudHistoryEntry[] = await res.json();
+    // 1. Get existing from backend. Se a listagem falhar, seguimos mesmo
+    //    assim: o POST é um upsert por título, então reenviar é seguro e
+    //    garante que as lembranças novas cheguem ao banco.
+    let cloudList: CloudHistoryEntry[] = [];
+    let cloudOk = false;
+    try {
+      const res = await apiFetch(`/api/albums?uid=${userId}`);
+      if (res.ok) {
+        cloudList = await res.json();
+        cloudOk = true;
+      } else {
+        console.error("[BackendSync Error] Failed to list albums:", res.status);
+      }
+    } catch (listErr) {
+      console.error("[BackendSync Error] Failed to list albums:", listErr);
+    }
 
     // 2. Upload any local histories that don't exist in the database
     for (const local of dedupedLocal) {
-      const exists = cloudList.some(c => historyKey(c.title) === historyKey(local.title));
+      const exists = cloudOk && cloudList.some(c => historyKey(c.title) === historyKey(local.title));
       if (!exists) {
+        // Foto base64 muito grande estouraria o limite de 4,5MB por
+        // requisição da Vercel — envia a lembrança sem a foto nesse caso
+        let imageForCloud: string | null = local.imageUrl || null;
+        if (imageForCloud && imageForCloud.startsWith("data:image") && imageForCloud.length > 3_500_000) {
+          imageForCloud = null;
+        }
+
         const postRes = await apiFetch("/api/albums", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -238,7 +257,7 @@ export async function syncHistoryEntries(userId: string, localHistories: History
             title: local.title,
             description: local.description,
             story: local.story,
-            imageUrl: local.imageUrl
+            imageUrl: imageForCloud
           })
         });
         if (!postRes.ok) {
