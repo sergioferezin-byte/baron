@@ -95,22 +95,43 @@ export default function App() {
     return localStorage.getItem(`mb_custom_barao_avatar_${id}`) || "";
   });
 
-  // Keep O Barão's portrait in sync on account changes
+  // Keep O Barão's portrait in sync on account changes.
+  // O banco de dados é a fonte da verdade: o que estiver salvo lá vale em
+  // todos os aparelhos (o localStorage é só uma cópia rápida).
   useEffect(() => {
     const id = currentUser ? currentUser.id : "guest";
-    const localAvatar = localStorage.getItem(`mb_custom_barao_avatar_${id}`) || "";
-    setBaronAvatar(localAvatar);
+    const storageKey = `mb_custom_barao_avatar_${id}`;
+    const localAvatar = localStorage.getItem(storageKey) || "";
+    setBaronAvatar(localAvatar); // resposta imediata enquanto consulta o banco
 
-    // Restaura o retrato personalizado do Barão salvo no banco quando este
-    // navegador não tem cópia local (troca de aparelho, cache limpo etc.)
-    if (currentUser && !localAvatar) {
-      fetchUserProfile(currentUser.id).then(profile => {
-        if (profile?.baraoAvatarUrl && typeof profile.baraoAvatarUrl === "string") {
-          setBaronAvatar(profile.baraoAvatarUrl);
-          localStorage.setItem(`mb_custom_barao_avatar_${id}`, profile.baraoAvatarUrl);
+    if (!currentUser) return;
+
+    fetchUserProfile(currentUser.id).then(profile => {
+      const dbAvatar = typeof profile?.baraoAvatarUrl === "string" ? profile.baraoAvatarUrl : "";
+
+      if (dbAvatar) {
+        // Banco tem retrato: prevalece sobre a cópia local desatualizada
+        if (dbAvatar !== localAvatar) {
+          setBaronAvatar(dbAvatar);
+          localStorage.setItem(storageKey, dbAvatar);
         }
-      }).catch(() => {});
-    }
+      } else if (localAvatar.startsWith("data:image")) {
+        // Retrato local antigo nunca sincronizado: salva no banco agora
+        apiFetch("/api/barao/avatar", {
+          method: "POST",
+          body: JSON.stringify({ uid: currentUser.id, dataUrl: localAvatar })
+        }).then(r => r.json().catch(() => null)).then(data => {
+          if (data?.avatarUrl) {
+            setBaronAvatar(data.avatarUrl);
+            localStorage.setItem(storageKey, data.avatarUrl);
+          }
+        }).catch(() => {});
+      } else if (localAvatar) {
+        // Banco sem retrato (restaurado ao clássico em outro aparelho)
+        setBaronAvatar("");
+        localStorage.removeItem(storageKey);
+      }
+    }).catch(() => {});
   }, [currentUser]);
 
   useEffect(() => {
