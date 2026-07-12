@@ -26,6 +26,7 @@ import {
 
 import BaraoPaywall from "./BaraoPaywall";
 import { syncHistoryEntries, deleteCloudHistoryEntry, uploadAlbumPhoto } from "../utils/supabaseSync";
+import { compressImageFile } from "../utils/imageCompress";
 import { requestBaraoImageUrl } from "../utils/baraoImage";
 
 interface BaraoHistoryProps {
@@ -140,17 +141,18 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
       setStoryError("Por favor sintonize apenas arquivos de imagem reais.");
       return;
     }
-    // Limit to 4MB for localStorage comfort
-    if (file.size > 4 * 1024 * 1024) {
-      setStoryError("Escolha um retrato menor que 4MB para guardarmos com leveza em seu baú.");
+    if (file.size > 12 * 1024 * 1024) {
+      setStoryError("Escolha um retrato menor que 12MB para guardarmos com leveza em seu baú.");
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      setUploadedBase64(reader.result as string);
-    };
-    reader.readAsDataURL(file);
+    // Comprime no navegador: garante que a foto caiba nos limites de envio
+    // da Vercel (4,5MB) e chegue de verdade ao Storage/banco
+    compressImageFile(file).then(compressed => {
+      setUploadedBase64(compressed);
+    }).catch(() => {
+      setStoryError("Não consegui ler esta imagem. Tente outro arquivo.");
+    });
   };
 
   // Drag and drop handlers
@@ -244,6 +246,8 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
         const hostedUrl = await uploadAlbumPhoto(finalImgUrl);
         if (hostedUrl) {
           finalImgUrl = hostedUrl;
+        } else {
+          console.warn("[Album] Foto não pôde ser hospedada no Storage; mantendo cópia local (não sincroniza).");
         }
       }
 

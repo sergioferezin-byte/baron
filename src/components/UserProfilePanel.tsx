@@ -9,6 +9,7 @@ import { User } from "../types";
 import { renderAvatarSvgOrImg } from "../utils/avatar";
 import BaraoPaywall from "./BaraoPaywall";
 import { syncUserProfile, fetchUserProfile } from "../utils/supabaseSync";
+import { compressImageFile } from "../utils/imageCompress";
 
 const SESSION_USER_KEY = "mb_logged_user";
 
@@ -899,11 +900,11 @@ export default function UserProfilePanel({ currentUser, onTabChange, onUserUpdat
                                   onChange={(e) => {
                                     const file = e.target.files?.[0];
                                     if (file) {
-                                      const reader = new FileReader();
-                                      reader.onloadend = () => {
-                                        saveProfile({ ...profile, avatarUrl: reader.result as string });
-                                      };
-                                      reader.readAsDataURL(file);
+                                      // Comprime antes de salvar: garante que a foto
+                                      // passe pelos limites de envio da Vercel (4,5MB)
+                                      compressImageFile(file, 800).then(compressed => {
+                                        saveProfile({ ...profile, avatarUrl: compressed });
+                                      }).catch(() => {});
                                     }
                                   }}
                                   className="hidden"
