@@ -1,17 +1,22 @@
 /**
- * Imagem poética do Barão (kie.ai + Z-Image).
+ * Imagem realista do Barão (kie.ai).
  *
- * Pede ao servidor a geração de uma imagem artística a partir do título e da
- * descrição de uma lembrança, e acompanha a tarefa até ficar pronta.
- * Devolve a URL da imagem, ou null quando indisponível (chave ausente,
- * falha ou tempo esgotado).
+ * Pede ao servidor a geração de uma imagem fotográfica a partir do título e
+ * da descrição de uma lembrança, e acompanha a tarefa até ficar pronta.
+ * Quando a cena pede, o servidor usa fotos de referência (retrato do Barão
+ * e/ou a foto de perfil da usuária, enviada em userPhoto) para manter os
+ * rostos fiéis. Devolve a URL da imagem, ou null quando indisponível.
  */
-export async function requestBaraoImageUrl(title: string, description: string): Promise<string | null> {
+export async function requestBaraoImageUrl(
+  title: string,
+  description: string,
+  userPhoto?: string
+): Promise<string | null> {
   try {
     const createRes = await fetch("/api/image/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, description })
+      body: JSON.stringify({ title, description, userPhoto: userPhoto || null })
     });
     const created = await createRes.json().catch(() => null);
 

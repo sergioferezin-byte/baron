@@ -225,7 +225,22 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
       let finalImgUrl = uploadedBase64;
       let entryType: HistoryEntry["type"] = "upload";
       if (!finalImgUrl) {
-        const paintedUrl = await requestBaraoImageUrl(finalTitle, finalDesc);
+        // Foto de perfil da usuária como referência para manter o rosto fiel
+        let userPhoto: string | undefined;
+        try {
+          const profileStorageKey = currentUser ? `mb_user_profile_${currentUser.id}` : "mb_user_profile_guest";
+          const savedProfile = localStorage.getItem(profileStorageKey);
+          if (savedProfile) {
+            const avatar = JSON.parse(savedProfile)?.avatarUrl;
+            if (typeof avatar === "string" && (avatar.startsWith("data:image") || avatar.startsWith("http"))) {
+              userPhoto = avatar;
+            }
+          }
+        } catch {
+          userPhoto = undefined;
+        }
+
+        const paintedUrl = await requestBaraoImageUrl(finalTitle, finalDesc, userPhoto);
         if (!paintedUrl) {
           throw new Error("Não consegui pintar a imagem desta lembrança neste instante. Tente novamente em alguns segundos ou anexe uma foto sua.");
         }

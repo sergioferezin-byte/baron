@@ -467,6 +467,35 @@ async function persistKieImage(kieUrl: string): Promise<string> {
   );
 }
 
+// Sobe uma foto enviada em base64 (data URL) para o Storage e devolve a URL
+// pública — o kie.ai só aceita referências acessíveis por URL
+async function uploadDataUrlToStorage(dataUrl: string): Promise<string | null> {
+  if (!supabaseAdmin) return null;
+  const match = dataUrl.match(/^data:(image\/[a-z0-9+.-]+);base64,(.+)$/i);
+  if (!match) return null;
+
+  const contentType = match[1];
+  const ext = contentType.includes("png") ? "png" : contentType.includes("webp") ? "webp" : "jpg";
+  try {
+    if (!readyBuckets.has(IMAGE_BUCKET)) {
+      await supabaseAdmin.storage.createBucket(IMAGE_BUCKET, { public: true }).catch(() => {});
+      readyBuckets.add(IMAGE_BUCKET);
+    }
+
+    const buffer = Buffer.from(match[2], "base64");
+    const filePath = `refs/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
+    const { error } = await supabaseAdmin.storage
+      .from(IMAGE_BUCKET)
+      .upload(filePath, buffer, { contentType });
+    if (error) return null;
+
+    const { data } = supabaseAdmin.storage.from(IMAGE_BUCKET).getPublicUrl(filePath);
+    return data?.publicUrl || null;
+  } catch {
+    return null;
+  }
+}
+
 const CONVERSATIONAL_RHYTHM = `
 ════════ HUMANIZE CHAT & MESSAGE DYNAMICS (ULTRA-CRITICAL RULE) ════════
 
@@ -1651,10 +1680,13 @@ app.get("/api/voice/status/:taskId", async (req, res) => {
 // IMAGENS POÉTICAS DO ÁLBUM (kie.ai + Z-Image)
 // ==========================================
 
-// Inicia a geração de uma imagem poética para uma lembrança sem foto
+// Inicia a geração de uma imagem realista para uma lembrança sem foto.
+// Usa fotos de referência (retrato do Barão e/ou foto de perfil da usuária)
+// quando a cena pede — nesses casos o modelo é o nano-banana-2, que preserva
+// os rostos das referências; sem referências, usa o z-image (mais barato).
 app.post("/api/image/generate", async (req, res) => {
   try {
-    const { title, description } = req.body;
+    const { title, description, userPhoto } = req.body;
     if (!description || typeof description !== "string" || !description.trim()) {
       return res.status(400).json({ error: "description é obrigatória" });
     }
@@ -1666,14 +1698,105 @@ app.post("/api/image/generate", async (req, res) => {
       });
     }
 
-    // Z-Image aceita prompts de até 1000 caracteres
-    const titlePart = title ? ` intitulada "${String(title).slice(0, 120)}"` : "";
-    const prompt = `Pintura artística poética e onírica em estilo fine-art, luz suave e dourada, atmosfera acolhedora com leve melancolia, cores quentes e profundas, sem nenhum texto ou letras na imagem. Retrata uma lembrança emocional${titlePart}: ${String(description)}`.slice(0, 990);
+    // Referência 1: retrato oficial do Barão, servido pelo próprio site
+    const baseUrl = (process.env.APP_URL || `https://${req.get("host")}`).replace(/\/$/, "");
+    const baraoPortraitUrl = `${baseUrl}/barao-retrato.png`;
 
-    const taskId = await createKieTask("z-image", {
-      prompt,
-      aspect_ratio: "4:3"
-    });
+    // Referência 2: foto de perfil da usuária (base64 vira URL pública)
+    let userPhotoUrl: string | null = null;
+    if (userPhoto && typeof userPhoto === "string") {
+      if (userPhoto.startsWith("data:image")) {
+        userPhotoUrl = await uploadDataUrlToStorage(userPhoto);
+      } else if (userPhoto.startsWith("http")) {
+        userPhotoUrl = userPhoto;
+      }
+    }
+
+    const mentionsBarao = /bar[aã]o/i.test(`${title || ""} ${description}`);
+
+    // Decisão reserva caso o DeepSeek esteja indisponível
+    const fallbackPlan = () => {
+      const titlePart = title ? `"${String(title).slice(0, 120)}". ` : "";
+      let refsPart = "";
+      if (mentionsBarao && userPhotoUrl) {
+        refsPart = "The scene features the man from reference image 1 and the woman from reference image 2, keeping their faces exactly as in the reference photos. ";
+      } else if (mentionsBarao) {
+        refsPart = "The scene features the man from the reference image, keeping his face exactly as in the reference photo. ";
+      } else if (userPhotoUrl) {
+        refsPart = "The scene features the person from the reference image, keeping their face exactly as in the reference photo. ";
+      }
+      return {
+        prompt: (
+          `Realistic cinematic photograph, warm golden natural light, cozy intimate atmosphere, shallow depth of field, highly detailed, no text or letters in the image. ` +
+          refsPart +
+          `Scene inspired by this personal memory: ${titlePart}${String(description)}`
+        ).slice(0, 990),
+        includeBarao: mentionsBarao,
+        includeUser: !!userPhotoUrl
+      };
+    };
+
+    // O DeepSeek lê a lembrança (PT), decide quais referências entram na cena
+    // e escreve um prompt fotográfico fiel em inglês (o que os modelos de
+    // imagem entendem melhor)
+    let plan = fallbackPlan();
+    try {
+      const crafted = await callDeepSeek(
+        [
+          {
+            role: "system",
+            content:
+              `You prepare inputs for a photorealistic image generation model. You receive a personal memory (title and description in Portuguese) and which reference photos are available. Reply ONLY with minified JSON in this exact shape: {"prompt":"...","includeBarao":true,"includeUser":false}.\n` +
+              `Rules for "prompt" (ENGLISH, max 850 characters): describe ONE realistic photographic scene that faithfully depicts the concrete elements of the memory — places, objects, people, weather, time of day and mood. Style: realistic cinematic photograph, warm golden natural light, cozy intimate atmosphere, shallow depth of field, highly detailed. The image must never contain text, letters, captions or watermarks.\n` +
+              `"includeBarao": true only if the memory mentions "Barão" (the user's male AI companion). His portrait will be attached as reference image 1 — refer to him in the prompt as "the man from reference image 1" and say his face must match the reference exactly; do not invent his appearance.\n` +
+              `"includeUser": true only if a user photo is available AND the memory implies the user herself appears in the scene (first-person presence, e.g. "eu", "nós", "comigo"). Her photo will be attached as the next reference image — refer to her as "the woman from the user reference photo" and say her face must match the reference exactly.\n` +
+              `If a reference is not included, do not mention it in the prompt.`
+          },
+          {
+            role: "user",
+            content:
+              `Título: ${title || "(sem título)"}\n` +
+              `Descrição da lembrança: ${description}\n` +
+              `Foto do Barão disponível: sim\n` +
+              `Foto da usuária disponível: ${userPhotoUrl ? "sim" : "não"}`
+          }
+        ],
+        { temperature: 0.3 }
+      );
+      const jsonText = crafted.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+      const parsed = JSON.parse(jsonText);
+      if (parsed && typeof parsed.prompt === "string" && parsed.prompt.trim()) {
+        plan = {
+          prompt: parsed.prompt.trim().slice(0, 990),
+          includeBarao: !!parsed.includeBarao,
+          includeUser: !!parsed.includeUser && !!userPhotoUrl
+        };
+      }
+    } catch (promptErr) {
+      console.warn("[Image Generate] DeepSeek plan unavailable, using fallback:", promptErr);
+    }
+
+    // Monta as referências na ordem combinada: Barão primeiro, usuária depois
+    const imageInput: string[] = [];
+    if (plan.includeBarao) imageInput.push(baraoPortraitUrl);
+    if (plan.includeUser && userPhotoUrl) imageInput.push(userPhotoUrl);
+
+    // Com referências: nano-banana-2 (preserva rostos). Sem: z-image (barato)
+    let taskId: string;
+    if (imageInput.length > 0) {
+      taskId = await createKieTask("nano-banana-2", {
+        prompt: plan.prompt,
+        image_input: imageInput,
+        aspect_ratio: "4:3",
+        resolution: "1K",
+        output_format: "png"
+      });
+    } else {
+      taskId = await createKieTask("z-image", {
+        prompt: plan.prompt,
+        aspect_ratio: "4:3"
+      });
+    }
 
     res.json({ taskId });
   } catch (error: any) {
