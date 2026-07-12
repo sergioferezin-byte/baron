@@ -1692,7 +1692,7 @@ app.get("/api/voice/status/:taskId", async (req, res) => {
 // os rostos das referências; sem referências, usa o z-image (mais barato).
 app.post("/api/image/generate", async (req, res) => {
   try {
-    const { title, description, userPhoto } = req.body;
+    const { title, description, userPhoto, attachedPhoto } = req.body;
     if (!description || typeof description !== "string" || !description.trim()) {
       return res.status(400).json({ error: "description é obrigatória" });
     }
@@ -1707,15 +1707,21 @@ app.post("/api/image/generate", async (req, res) => {
     // Referência 1: retrato oficial do Barão
     const baraoPortraitUrl = BARAO_REFERENCE_IMAGE_URL;
 
-    // Referência 2: foto de perfil da usuária (base64 vira URL pública)
-    let userPhotoUrl: string | null = null;
-    if (userPhoto && typeof userPhoto === "string") {
-      if (userPhoto.startsWith("data:image")) {
-        userPhotoUrl = await uploadDataUrlToStorage(userPhoto);
-      } else if (userPhoto.startsWith("http")) {
-        userPhotoUrl = userPhoto;
-      }
-    }
+    // Normaliza uma foto recebida (base64 vira URL pública no Storage)
+    const resolvePhotoUrl = async (photo: unknown): Promise<string | null> => {
+      if (!photo || typeof photo !== "string") return null;
+      if (photo.startsWith("data:image")) return uploadDataUrlToStorage(photo);
+      if (photo.startsWith("http")) return photo;
+      return null;
+    };
+
+    // Foto ANEXADA à lembrança: sempre entra como referência (a cena é
+    // recriada a partir dela). Sem anexo, vale a foto de perfil, que o
+    // DeepSeek decide incluir conforme a lembrança.
+    const attachedPhotoUrl = await resolvePhotoUrl(attachedPhoto);
+    const profilePhotoUrl = attachedPhotoUrl ? null : await resolvePhotoUrl(userPhoto);
+    const userPhotoUrl = attachedPhotoUrl || profilePhotoUrl;
+    const isAttached = !!attachedPhotoUrl;
 
     const mentionsBarao = /bar[aã]o/i.test(`${title || ""} ${description}`);
 
@@ -1738,7 +1744,7 @@ app.post("/api/image/generate", async (req, res) => {
           `Scene: ${String(description)}`
         ).slice(0, 990),
         includeBarao: mentionsBarao,
-        includeUser: !!userPhotoUrl
+        includeUser: isAttached || !!userPhotoUrl
       };
     };
 
@@ -1757,6 +1763,7 @@ app.post("/api/image/generate", async (req, res) => {
               `The image must never contain text: state that no text, letters, captions or typography appear in the image. NEVER write the memory title in the prompt and NEVER put any words in quotation marks — quoted words get rendered as text inside the image.\n` +
               `"includeBarao": true only if the memory mentions "Barão" (the user's male AI companion). His portrait will be attached as reference image 1 — refer to him in the prompt as "the man from reference image 1" and say his face must match the reference exactly; do not invent his appearance.\n` +
               `"includeUser": true only if a user photo is available AND the memory implies the user herself appears in the scene (first-person presence, e.g. "eu", "nós", "comigo"). Her photo will be attached as the next reference image — refer to her as "the woman from the user reference photo" and say her face must match the reference exactly.\n` +
+              `EXCEPTION: if the user photo is marked as ATTACHED to this memory, "includeUser" MUST be true and the scene must be recreated based on that photo — keep the people, their faces and the key elements of the attached photo faithful, adapting the setting to the memory description.\n` +
               `If a reference is not included, do not mention it in the prompt.`
           },
           {
@@ -1765,7 +1772,7 @@ app.post("/api/image/generate", async (req, res) => {
               `Título: ${title || "(sem título)"}\n` +
               `Descrição da lembrança: ${description}\n` +
               `Foto do Barão disponível: sim\n` +
-              `Foto da usuária disponível: ${userPhotoUrl ? "sim" : "não"}`
+              `Foto da usuária disponível: ${userPhotoUrl ? (isAttached ? "sim — ANEXADA a esta lembrança (deve ser a base da cena)" : "sim (foto de perfil)") : "não"}`
           }
         ],
         { temperature: 0.3 }
@@ -1776,7 +1783,8 @@ app.post("/api/image/generate", async (req, res) => {
         plan = {
           prompt: parsed.prompt.trim().slice(0, 990),
           includeBarao: !!parsed.includeBarao,
-          includeUser: !!parsed.includeUser && !!userPhotoUrl
+          // Foto anexada à lembrança sempre entra como referência
+          includeUser: isAttached || (!!parsed.includeUser && !!userPhotoUrl)
         };
       }
     } catch (promptErr) {

@@ -10,13 +10,20 @@
 export async function requestBaraoImageUrl(
   title: string,
   description: string,
-  userPhoto?: string
+  userPhoto?: string,
+  attachedPhoto?: string
 ): Promise<string | null> {
   try {
     const createRes = await fetch("/api/image/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, description, userPhoto: userPhoto || null })
+      body: JSON.stringify({
+        title,
+        description,
+        userPhoto: userPhoto || null,
+        // Foto anexada à lembrança: sempre usada como base/referência da cena
+        attachedPhoto: attachedPhoto || null
+      })
     });
     const created = await createRes.json().catch(() => null);
 

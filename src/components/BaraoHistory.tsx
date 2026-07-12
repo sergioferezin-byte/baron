@@ -237,42 +237,51 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
 
       // 2. Use the user's uploaded image as is; without one, O Barão paints
       //    a poetic image from the memory's description (kie.ai + Z-Image)
-      let finalImgUrl = uploadedBase64;
-      let entryType: HistoryEntry["type"] = "upload";
-
-      // Foto enviada vira URL leve no Storage — evita estourar o limite do
-      // navegador (localStorage) e o de 4,5MB das requisições na Vercel
-      if (finalImgUrl && finalImgUrl.startsWith("data:image") && currentUser) {
-        const hostedUrl = await uploadAlbumPhoto(finalImgUrl);
-        if (hostedUrl) {
-          finalImgUrl = hostedUrl;
-        } else {
-          console.warn("[Album] Foto não pôde ser hospedada no Storage; mantendo cópia local (não sincroniza).");
+      // Foto enviada vira URL leve no Storage — ela é a referência/base da
+      // cena que o Barão vai recriar (não é usada diretamente no álbum)
+      let attachedPhotoUrl: string | null = null;
+      if (uploadedBase64 && currentUser) {
+        attachedPhotoUrl = await uploadAlbumPhoto(uploadedBase64);
+        if (!attachedPhotoUrl) {
+          console.warn("[Album] Foto não pôde ser hospedada no Storage; enviando em base64 como referência.");
         }
       }
 
-      if (!finalImgUrl) {
-        // Foto de perfil da usuária como referência para manter o rosto fiel
-        let userPhoto: string | undefined;
-        try {
-          const profileStorageKey = currentUser ? `mb_user_profile_${currentUser.id}` : "mb_user_profile_guest";
-          const savedProfile = localStorage.getItem(profileStorageKey);
-          if (savedProfile) {
-            const avatar = JSON.parse(savedProfile)?.avatarUrl;
-            if (typeof avatar === "string" && (avatar.startsWith("data:image") || avatar.startsWith("http"))) {
-              userPhoto = avatar;
-            }
+      // Foto de perfil da usuária como referência para manter o rosto fiel
+      // (usada apenas quando não há foto anexada)
+      let userPhoto: string | undefined;
+      try {
+        const profileStorageKey = currentUser ? `mb_user_profile_${currentUser.id}` : "mb_user_profile_guest";
+        const savedProfile = localStorage.getItem(profileStorageKey);
+        if (savedProfile) {
+          const avatar = JSON.parse(savedProfile)?.avatarUrl;
+          if (typeof avatar === "string" && (avatar.startsWith("data:image") || avatar.startsWith("http"))) {
+            userPhoto = avatar;
           }
-        } catch {
-          userPhoto = undefined;
         }
+      } catch {
+        userPhoto = undefined;
+      }
 
-        const paintedUrl = await requestBaraoImageUrl(finalTitle, finalDesc, userPhoto);
-        if (!paintedUrl) {
-          throw new Error("Não consegui pintar a imagem desta lembrança neste instante. Tente novamente em alguns segundos ou anexe uma foto sua.");
-        }
+      // O Barão sempre cria a imagem final via kie.ai, seguindo a lembrança;
+      // com foto anexada, a cena é recriada a partir dela (rostos fiéis)
+      let finalImgUrl = "";
+      let entryType: HistoryEntry["type"] = "generated";
+      const paintedUrl = await requestBaraoImageUrl(
+        finalTitle,
+        finalDesc,
+        userPhoto,
+        attachedPhotoUrl || uploadedBase64 || undefined
+      );
+
+      if (paintedUrl) {
         finalImgUrl = paintedUrl;
-        entryType = "generated";
+      } else if (attachedPhotoUrl || uploadedBase64) {
+        // Plano B: se a geração falhar, usa a própria foto enviada
+        finalImgUrl = attachedPhotoUrl || uploadedBase64;
+        entryType = "upload";
+      } else {
+        throw new Error("Não consegui pintar a imagem desta lembrança neste instante. Tente novamente em alguns segundos ou anexe uma foto sua.");
       }
 
       const newEntry: HistoryEntry = {
@@ -513,7 +522,7 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
 
               <div className="space-y-4">
                 <p className="font-serif text-xs text-zinc-400 italic">
-                  Compartilhe uma fotografia, paisagem ou imagem de um momento especial e sintonize com Meu Barão. Escreva uma descrição ou desabafo poético logo abaixo para receber uma crônica marcante e terapêutica sobre o seu instante. Se preferir não enviar foto, Meu Barão pintará uma imagem poética exclusiva a partir das suas palavras.
+                  Compartilhe uma fotografia de um momento especial e sintonize com Meu Barão: ele recriará a cena em uma nova imagem artística, mantendo os rostos fiéis à sua foto, junto com uma crônica marcante sobre o seu instante. Sem foto, Meu Barão pinta a cena apenas a partir das suas palavras.
                 </p>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
@@ -557,7 +566,7 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
                         <div>
                           <p className="font-serif text-xs font-medium text-white">Carregar Sua Imagem (Opcional)</p>
                           <p className="text-[10px] text-zinc-500 font-mono uppercase mt-1">Arrastar e soltar ou clique para procurar</p>
-                          <p className="text-[10px] text-zinc-500 font-serif italic mt-1.5">Sem foto? O Barão pinta uma imagem poética para esta lembrança.</p>
+                          <p className="text-[10px] text-zinc-500 font-serif italic mt-1.5">Sua foto vira a base: o Barão recria a cena em uma nova imagem, com os rostos fiéis.</p>
                         </div>
                       </div>
                     )}
