@@ -1675,7 +1675,10 @@ app.post("/api/image/generate", async (req, res) => {
     res.json({ taskId });
   } catch (error: any) {
     console.error("[Image Generate] Failed:", error);
-    res.status(500).json({ error: "Erro ao iniciar a pintura da lembrança." });
+    res.status(500).json({
+      error: "Erro ao iniciar a pintura da lembrança.",
+      detail: String(error?.message || error)
+    });
   }
 });
 
