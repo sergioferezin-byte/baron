@@ -352,6 +352,97 @@ async function callDeepSeek(
   return data?.choices?.[0]?.message?.content || "";
 }
 
+// ===== kie.ai — geração de mídia (voz do Barão via ElevenLabs) =====
+// Tarefas são assíncronas: createTask devolve um taskId e o resultado é
+// consultado em recordInfo até ficar pronto.
+const KIE_API_BASE = "https://api.kie.ai/api/v1";
+const KIE_TTS_MODEL = "elevenlabs/text-to-speech-multilingual-v2";
+// Voz padrão: "Hank — Deep and Engaging Narrator". Troque via KIE_TTS_VOICE.
+const KIE_TTS_VOICE = process.env.KIE_TTS_VOICE || "6F5Zhi321D3Oq7v1oNT4";
+
+async function createKieTask(model: string, input: Record<string, unknown>): Promise<string> {
+  const key = process.env.KIE_API_KEY;
+  if (!key) {
+    throw new Error("⚠️ KIE_API_KEY environment variable is not defined.");
+  }
+
+  const response = await fetch(`${KIE_API_BASE}/jobs/createTask`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${key}`
+    },
+    body: JSON.stringify({ model, input })
+  });
+
+  const data: any = await response.json().catch(() => null);
+  if (!response.ok || !data || data.code !== 200 || !data.data?.taskId) {
+    throw new Error(`kie.ai createTask error ${response.status}: ${JSON.stringify(data)}`);
+  }
+  return data.data.taskId;
+}
+
+async function getKieTask(taskId: string): Promise<{ state: string; resultUrls: string[]; failMsg: string }> {
+  const key = process.env.KIE_API_KEY;
+  if (!key) {
+    throw new Error("⚠️ KIE_API_KEY environment variable is not defined.");
+  }
+
+  const response = await fetch(`${KIE_API_BASE}/jobs/recordInfo?taskId=${encodeURIComponent(taskId)}`, {
+    headers: { Authorization: `Bearer ${key}` }
+  });
+
+  const data: any = await response.json().catch(() => null);
+  if (!response.ok || !data || data.code !== 200) {
+    throw new Error(`kie.ai recordInfo error ${response.status}: ${JSON.stringify(data)}`);
+  }
+
+  const info = data.data || {};
+  let resultUrls: string[] = [];
+  if (info.resultJson) {
+    try {
+      resultUrls = JSON.parse(info.resultJson)?.resultUrls || [];
+    } catch {
+      resultUrls = [];
+    }
+  }
+  return { state: info.state || "waiting", resultUrls, failMsg: info.failMsg || "" };
+}
+
+// Os arquivos gerados pelo kie.ai expiram em ~24h; salvamos no Supabase Storage
+// para que os áudios das mensagens permaneçam reproduzíveis para sempre.
+const VOICE_BUCKET = "barao-voz";
+let voiceBucketReady = false;
+
+async function persistKieAudio(kieUrl: string): Promise<string> {
+  if (!supabaseAdmin) return kieUrl;
+  try {
+    if (!voiceBucketReady) {
+      await supabaseAdmin.storage.createBucket(VOICE_BUCKET, { public: true }).catch(() => {});
+      voiceBucketReady = true;
+    }
+
+    const resp = await fetch(kieUrl);
+    if (!resp.ok) return kieUrl;
+    const buffer = Buffer.from(await resp.arrayBuffer());
+
+    const filePath = `tts/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.mp3`;
+    const { error } = await supabaseAdmin.storage
+      .from(VOICE_BUCKET)
+      .upload(filePath, buffer, { contentType: "audio/mpeg" });
+    if (error) {
+      console.error("[Voice Storage] Upload failed, using temporary URL:", error.message);
+      return kieUrl;
+    }
+
+    const { data } = supabaseAdmin.storage.from(VOICE_BUCKET).getPublicUrl(filePath);
+    return data?.publicUrl || kieUrl;
+  } catch (err) {
+    console.error("[Voice Storage] Persist failed, using temporary URL:", err);
+    return kieUrl;
+  }
+}
+
 const CONVERSATIONAL_RHYTHM = `
 ════════ HUMANIZE CHAT & MESSAGE DYNAMICS (ULTRA-CRITICAL RULE) ════════
 
@@ -1463,6 +1554,74 @@ Se "proposal" não estiver pronto ou não for o momento ideal de propor ainda, a
 });
 
 // Endpoint to generate a customized face portrait of O Barão via AI text prompt
+// ==========================================
+// VOZ DO BARÃO (kie.ai + ElevenLabs TTS)
+// ==========================================
+
+// Inicia a geração de voz para um texto; devolve o taskId para o frontend acompanhar
+app.post("/api/voice/speak", async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text || typeof text !== "string" || !text.trim()) {
+      return res.status(400).json({ error: "text é obrigatório" });
+    }
+
+    if (!process.env.KIE_API_KEY) {
+      return res.status(200).json({
+        isConfigError: true,
+        error: "KIE_API_KEY não configurada — usando a voz do navegador."
+      });
+    }
+
+    // Remove marcações de markdown e respeita o limite de 5000 caracteres do modelo
+    const cleanText = text
+      .replace(/\*\*/g, "")
+      .replace(/\*/g, "")
+      .replace(/#/g, "")
+      .trim()
+      .slice(0, 4900);
+
+    const taskId = await createKieTask(KIE_TTS_MODEL, {
+      text: cleanText,
+      voice: KIE_TTS_VOICE,
+      stability: 0.5,
+      similarity_boost: 0.75,
+      speed: 0.92
+    });
+
+    res.json({ taskId });
+  } catch (error: any) {
+    console.error("[Voice Speak] Failed:", error);
+    res.status(500).json({ error: "Erro ao iniciar a voz do Barão." });
+  }
+});
+
+// Consulta o status da geração; quando pronta, persiste o áudio e devolve a URL
+app.get("/api/voice/status/:taskId", async (req, res) => {
+  try {
+    const task = await getKieTask(req.params.taskId);
+
+    if (task.state === "success") {
+      const kieUrl = task.resultUrls[0];
+      if (!kieUrl) {
+        return res.json({ state: "fail", error: "Nenhum áudio retornado pela geração." });
+      }
+      const audioUrl = await persistKieAudio(kieUrl);
+      return res.json({ state: "success", audioUrl });
+    }
+
+    if (task.state === "fail") {
+      console.error("[Voice Status] kie.ai generation failed:", task.failMsg);
+      return res.json({ state: "fail", error: task.failMsg || "Falha na geração de voz." });
+    }
+
+    res.json({ state: "processing" });
+  } catch (error: any) {
+    console.error("[Voice Status] Failed:", error);
+    res.status(500).json({ error: "Erro ao consultar a voz do Barão." });
+  }
+});
+
 app.post("/api/barao/generate-avatar", (req, res) => {
   try {
     const { prompt } = req.body;
@@ -1801,7 +1960,8 @@ app.get("/api/health", async (req, res) => {
     databaseError: dbOk ? null : getLastDbError(),
     supabaseAuth: supabaseAdmin ? "ok" : "não configurado — verifique SUPABASE_SERVICE_ROLE_KEY",
     geminiKeyConfigured: !!process.env.GEMINI_API_KEY,
-    deepseekKeyConfigured: !!process.env.DEEPSEEK_API_KEY
+    deepseekKeyConfigured: !!process.env.DEEPSEEK_API_KEY,
+    kieKeyConfigured: !!process.env.KIE_API_KEY
   });
 });
 

@@ -17,6 +17,7 @@ class AudioSynthesizer {
 
   private pianoTimer: any = null;
   private fireTimer: any = null;
+  private currentAudio: HTMLAudioElement | null = null;
 
   public initContext() {
     if (!this.ctx) {
@@ -349,9 +350,35 @@ class AudioSynthesizer {
     window.speechSynthesis.speak(utterance);
   }
 
+  // Plays a generated voice file (kie.ai/ElevenLabs) for O Barão's responses
+  public playAudioUrl(url: string, onEnd?: () => void) {
+    this.stopSpeaking();
+
+    const audio = new Audio(url);
+    this.currentAudio = audio;
+
+    const finish = () => {
+      if (this.currentAudio === audio) {
+        this.currentAudio = null;
+      }
+      if (onEnd) onEnd();
+    };
+    audio.onended = finish;
+    audio.onerror = finish;
+
+    audio.play().catch(() => finish());
+  }
+
   public stopSpeaking() {
     if (window.speechSynthesis) {
       window.speechSynthesis.cancel();
+    }
+    if (this.currentAudio) {
+      const audio = this.currentAudio;
+      this.currentAudio = null;
+      audio.onended = null;
+      audio.onerror = null;
+      audio.pause();
     }
   }
 }

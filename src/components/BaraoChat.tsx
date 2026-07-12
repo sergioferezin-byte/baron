@@ -6,6 +6,7 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { Message, User } from "../types";
 import { synther } from "../utils/audioSynthesizer";
+import { requestBaraoVoiceUrl } from "../utils/baraoVoice";
 import { 
   Send, 
   Mic, 
@@ -823,18 +824,45 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
     }
   };
 
-  // Voice playback toggling
-  const speakResponse = (id: string, text: string) => {
+  // Voice playback toggling — tenta a voz realista (kie.ai/ElevenLabs) e
+  // recorre à voz do navegador se indisponível
+  const speechRequestRef = useRef(0);
+
+  const speakResponse = async (id: string, text: string) => {
     if (activeSpeechId === id) {
+      speechRequestRef.current++;
       synther.stopSpeaking();
       setActiveSpeechId(null);
+      return;
+    }
+
+    synther.stopSpeaking();
+    setActiveSpeechId(id);
+    const requestId = ++speechRequestRef.current;
+
+    // Reaproveita o áudio já gerado para esta mensagem, se existir
+    const cachedUrl = messages.find(m => m.id === id)?.audioUrl;
+    const audioUrl = cachedUrl || await requestBaraoVoiceUrl(text);
+
+    // Usuária cancelou ou pediu outra fala enquanto o áudio era gerado
+    if (speechRequestRef.current !== requestId) return;
+
+    if (audioUrl) {
+      if (!cachedUrl) {
+        // Guarda a URL na mensagem para não gerar (e pagar) de novo no replay
+        setMessages(prev => {
+          const next = prev.map(m => (m.id === id ? { ...m, audioUrl } : m));
+          if (!isIncognito) {
+            localStorage.setItem(storageKey, JSON.stringify(next));
+            const baseKey = currentUser ? `barao_chat_messages_${currentUser.id}` : "barao_chat_messages_guest";
+            localStorage.setItem(baseKey, JSON.stringify(next));
+          }
+          return next;
+        });
+      }
+      synther.playAudioUrl(audioUrl, () => setActiveSpeechId(null));
     } else {
-      setActiveSpeechId(id);
-      synther.speakText(
-        text,
-        undefined,
-        () => setActiveSpeechId(null)
-      );
+      synther.speakText(text, undefined, () => setActiveSpeechId(null));
     }
   };
 
@@ -1059,13 +1087,21 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
       setVoiceState("speaking");
 
       // Speak back text and automatically restart listening loop on end
-      synther.speakText(responseText, undefined, () => {
+      const resumeListening = () => {
         setVoiceState((currentVoiceState) => {
           // Double check voice connection stays active before calling listen
           startVoiceListening();
           return "listening";
         });
-      });
+      };
+
+      // Voz realista do Barão via kie.ai; navegador como reserva
+      const voiceAudioUrl = await requestBaraoVoiceUrl(responseText);
+      if (voiceAudioUrl) {
+        synther.playAudioUrl(voiceAudioUrl, resumeListening);
+      } else {
+        synther.speakText(responseText, undefined, resumeListening);
+      }
 
     } catch (err) {
       console.error(err);
