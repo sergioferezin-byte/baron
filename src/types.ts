@@ -57,6 +57,9 @@ export interface DiaryEntry {
   summary?: string[]; // key highlights
   intensity?: number; // emotional weight 1-5
   createdAt: string;
+  // true quando já esteve no banco: se sumir de lá, foi apagada em outro
+  // aparelho e a cópia local deve ser descartada (não reenviada)
+  synced?: boolean;
 }
 
 export interface HistoryEntry {
@@ -67,6 +70,9 @@ export interface HistoryEntry {
   story: string;
   type: "upload" | "generated";
   createdAt: string;
+  // true quando já esteve no banco: se sumir de lá, foi apagada em outro
+  // aparelho e a cópia local deve ser descartada (não reenviada)
+  synced?: boolean;
 }
 
 

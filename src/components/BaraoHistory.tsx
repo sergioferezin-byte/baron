@@ -339,8 +339,12 @@ export default function BaraoHistory({ currentUser, onPromptAuth, onUserUpdate }
       setHistoryList(updated);
       localStorage.setItem(historyStorageKey, JSON.stringify(updated));
       if (currentUser) {
-        syncHistoryEntries(currentUser.id, updated).catch(err => {
-          console.warn("[FirebaseSync History Add]: ", err);
+        syncHistoryEntries(currentUser.id, updated).then(merged => {
+          // Persiste as marcas de sincronização (evita reenvio/ressurreição)
+          setHistoryList(merged);
+          localStorage.setItem(historyStorageKey, JSON.stringify(merged));
+        }).catch(err => {
+          console.warn("[BackendSync History Add]: ", err);
         });
       }
 

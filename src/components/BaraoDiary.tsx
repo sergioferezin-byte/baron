@@ -230,8 +230,11 @@ export default function BaraoDiary({ currentUser, onPromptAuth, onUserUpdate }: 
       setDiaryEntries(updatedEntries);
       localStorage.setItem(diaryStorageKey, JSON.stringify(updatedEntries));
       if (currentUser) {
-        syncDiaryEntries(currentUser.id, updatedEntries).catch(err => {
-          console.warn("[FirebaseSync Diary Gen]: ", err);
+        syncDiaryEntries(currentUser.id, updatedEntries).then(merged => {
+          setDiaryEntries(merged);
+          localStorage.setItem(diaryStorageKey, JSON.stringify(merged));
+        }).catch(err => {
+          console.warn("[BackendSync Diary Gen]: ", err);
         });
       }
     } catch (err: any) {
@@ -321,8 +324,11 @@ export default function BaraoDiary({ currentUser, onPromptAuth, onUserUpdate }: 
     setDiaryEntries(updatedEntries);
     localStorage.setItem(diaryStorageKey, JSON.stringify(updatedEntries));
     if (currentUser) {
-      syncDiaryEntries(currentUser.id, updatedEntries).catch(err => {
-        console.warn("[FirebaseSync Diary Edit]: ", err);
+      syncDiaryEntries(currentUser.id, updatedEntries).then(merged => {
+        setDiaryEntries(merged);
+        localStorage.setItem(diaryStorageKey, JSON.stringify(merged));
+      }).catch(err => {
+        console.warn("[BackendSync Diary Edit]: ", err);
       });
     }
     setEditingDayId(null);

@@ -95,6 +95,18 @@ export default function App() {
     return localStorage.getItem(`mb_custom_barao_avatar_${id}`) || "";
   });
 
+  // Sessão expirada em qualquer chamada ao servidor: reabre o login para
+  // renovar o acesso — sem isso a sincronização falharia em silêncio e os
+  // dados ficariam presos no navegador
+  useEffect(() => {
+    const onSessionExpired = () => {
+      setAuthInitialMode("login");
+      setShowAuthModal(true);
+    };
+    window.addEventListener("barao:session-expired", onSessionExpired);
+    return () => window.removeEventListener("barao:session-expired", onSessionExpired);
+  }, []);
+
   // Keep O Barão's portrait in sync on account changes.
   // O banco de dados é a fonte da verdade: o que estiver salvo lá vale em
   // todos os aparelhos (o localStorage é só uma cópia rápida).

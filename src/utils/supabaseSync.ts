@@ -5,6 +5,8 @@ import { supabase } from "../lib/supabase";
  * fetch wrapper that attaches the Supabase session JWT.
  * The backend requires it to authorize access to user data.
  */
+let lastSessionExpiredWarn = 0;
+
 export async function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (supabase) {
@@ -12,7 +14,21 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
     const token = data.session?.access_token;
     if (token) headers["Authorization"] = `Bearer ${token}`;
   }
-  return fetch(input, { ...init, headers: { ...headers, ...(init.headers as Record<string, string> | undefined) } });
+  const response = await fetch(input, { ...init, headers: { ...headers, ...(init.headers as Record<string, string> | undefined) } });
+
+  // Sessão vencida/ausente: sem o token válido, NADA sincroniza com o banco
+  // (tudo fica preso no navegador). Avisa o app para pedir novo login,
+  // no máximo uma vez por minuto para não virar spam.
+  if (response.status === 401 && typeof window !== "undefined") {
+    console.error(`[BackendSync] Sessão expirada ou ausente ao chamar ${input} — sincronização bloqueada até novo login.`);
+    const now = Date.now();
+    if (now - lastSessionExpiredWarn > 60_000) {
+      lastSessionExpiredWarn = now;
+      window.dispatchEvent(new CustomEvent("barao:session-expired"));
+    }
+  }
+
+  return response;
 }
 
 export enum OperationType {
@@ -114,10 +130,20 @@ export async function syncDiaryEntries(userId: string, localEntries: DiaryEntry[
     const rawCloudList: CloudDiaryEntry[] = await res.json();
     const cloudList = rawCloudList.map(c => ({ ...c, date: String(c.date).slice(0, 10) }));
 
-    // 2. Upload local entries that are missing or outdated in the cloud
-    //    (the backend upserts by usuario_id + data_resumo)
+    // 2. Concilia cada página local com o banco:
+    //    - existe no banco → mantém (atualizando lá se o texto mudou);
+    //    - não existe mas JÁ FOI sincronizada → apagada em outro aparelho:
+    //      descarta a cópia local;
+    //    - não existe e nunca foi sincronizada → é nova: envia ao banco.
+    const merged: DiaryEntry[] = [];
     for (const local of localEntries) {
       const cloud = cloudList.find(c => c.date === local.id);
+
+      if (!cloud && local.synced) {
+        // Apagada em outro aparelho — remove localmente também
+        continue;
+      }
+
       if (!cloud || cloud.content !== local.content) {
         const postRes = await apiFetch("/api/diaries", {
           method: "POST",
@@ -137,12 +163,13 @@ export async function syncDiaryEntries(userId: string, localEntries: DiaryEntry[
             await postRes.text().catch(() => "")
           );
         }
+        merged.push({ ...local, synced: postRes.ok ? true : local.synced });
+      } else {
+        merged.push({ ...local, synced: true });
       }
     }
 
-    // 3. Merge: local entries carry the full data (status, summary, intensity);
-    //    cloud-only days are mapped back into the DiaryEntry shape
-    const merged: DiaryEntry[] = [...localEntries];
+    // 3. Adiciona páginas que só existem no banco (outros aparelhos)
     for (const cloud of cloudList) {
       if (!merged.some(l => l.id === cloud.date)) {
         merged.push({
@@ -152,7 +179,8 @@ export async function syncDiaryEntries(userId: string, localEntries: DiaryEntry[
           status: "generated",
           summary: cloud.title ? cloud.title.split(", ") : [],
           intensity: 0,
-          createdAt: new Date().toISOString()
+          createdAt: new Date().toISOString(),
+          synced: true
         });
       }
     }
@@ -238,45 +266,61 @@ export async function syncHistoryEntries(userId: string, localHistories: History
       console.error("[BackendSync Error] Failed to list albums:", listErr);
     }
 
-    // 2. Upload any local histories that don't exist in the database
+    // 2. Concilia cada lembrança local com o banco:
+    //    - existe no banco → mantém e marca como sincronizada;
+    //    - não existe mas JÁ FOI sincronizada → foi apagada em outro
+    //      aparelho: descarta a cópia local (não ressuscita);
+    //    - não existe e nunca foi sincronizada → é nova: envia ao banco.
+    const reconciled: HistoryEntry[] = [];
     for (const local of dedupedLocal) {
-      const exists = cloudOk && cloudList.some(c => historyKey(c.title) === historyKey(local.title));
-      if (!exists) {
-        // Foto base64 muito grande estouraria o limite de 4,5MB por
-        // requisição da Vercel — envia a lembrança sem a foto nesse caso
-        let imageForCloud: string | null = local.imageUrl || null;
-        if (imageForCloud && imageForCloud.startsWith("data:image") && imageForCloud.length > 3_500_000) {
-          imageForCloud = null;
-        }
+      const cloud = cloudOk ? cloudList.find(c => historyKey(c.title) === historyKey(local.title)) : undefined;
 
-        const postRes = await apiFetch("/api/albums", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            uid: userId,
-            title: local.title,
-            description: local.description,
-            story: local.story,
-            imageUrl: imageForCloud
-          })
-        });
-        if (!postRes.ok) {
-          console.error(
-            `[BackendSync Error] Failed to save album entry "${local.title}":`,
-            postRes.status,
-            await postRes.text().catch(() => "")
-          );
-        }
+      if (cloud) {
+        reconciled.push({ ...local, synced: true });
+        continue;
       }
+
+      if (cloudOk && local.synced) {
+        // Apagada em outro aparelho — remove localmente também
+        continue;
+      }
+
+      // Foto base64 muito grande estouraria o limite de 4,5MB por
+      // requisição da Vercel — envia a lembrança sem a foto nesse caso
+      let imageForCloud: string | null = local.imageUrl || null;
+      if (imageForCloud && imageForCloud.startsWith("data:image") && imageForCloud.length > 3_500_000) {
+        imageForCloud = null;
+      }
+
+      const postRes = await apiFetch("/api/albums", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          uid: userId,
+          title: local.title,
+          description: local.description,
+          story: local.story,
+          imageUrl: imageForCloud
+        })
+      });
+      if (!postRes.ok) {
+        console.error(
+          `[BackendSync Error] Failed to save album entry "${local.title}":`,
+          postRes.status,
+          await postRes.text().catch(() => "")
+        );
+      }
+      reconciled.push({ ...local, synced: postRes.ok ? true : local.synced });
     }
 
     // 3. Merge: local entries first, then cloud-only ones (dedup by title).
     //    If the local copy lost its image (ex.: localStorage cheio), adota a
     //    imagem guardada no banco.
-    const merged: HistoryEntry[] = [...dedupedLocal];
+    const merged: HistoryEntry[] = [...reconciled];
+    const mergedKeys = new Set(merged.map(l => historyKey(l.title)));
     for (const cloud of cloudList) {
       const key = historyKey(cloud.title);
-      if (seen.has(key)) {
+      if (mergedKeys.has(key)) {
         const existing = merged.find(l => historyKey(l.title) === key);
         if (existing) {
           if (!existing.imageUrl && cloud.imageUrl) existing.imageUrl = cloud.imageUrl;
@@ -284,7 +328,7 @@ export async function syncHistoryEntries(userId: string, localHistories: History
         }
         continue;
       }
-      seen.add(key);
+      mergedKeys.add(key);
       merged.push({
         id: "cloud-" + cloud.id,
         title: cloud.title,
@@ -292,7 +336,8 @@ export async function syncHistoryEntries(userId: string, localHistories: History
         description: cloud.description || "",
         story: cloud.story || "",
         type: "upload",
-        createdAt: cloud.createdAt || new Date().toISOString()
+        createdAt: cloud.createdAt || new Date().toISOString(),
+        synced: true
       });
     }
     return merged;
