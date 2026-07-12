@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { 
   User as UserIcon, Sparkles, Heart, Compass, Music, Film, MapPin, 
@@ -138,7 +138,11 @@ export default function UserProfilePanel({ currentUser, onTabChange, onUserUpdat
   const [newBookText, setNewBookText] = useState("");
   const [newWishlistPlaceText, setNewWishlistPlaceText] = useState("");
 
-  // Sync profile options
+  // Número de série: um salvamento local invalida consultas ao banco em voo
+  const profileSyncRef = useRef(0);
+
+  // Sync profile options — o banco de dados é a fonte única da verdade:
+  // o que estiver salvo lá prevalece sobre a cópia local em todo aparelho
   useEffect(() => {
     const saved = localStorage.getItem(profileStorageKey);
     if (saved) {
@@ -147,15 +151,27 @@ export default function UserProfilePanel({ currentUser, onTabChange, onUserUpdat
       setProfile({});
     }
 
-    // Restaura o perfil guardado no banco quando este navegador ainda não
-    // tem uma cópia local (troca de aparelho, cache limpo etc.)
     if (currentUser) {
+      const seq = ++profileSyncRef.current;
       fetchUserProfile(currentUser.id).then(remote => {
-        if (!remote || Object.keys(remote).length === 0) return;
-        const local = localStorage.getItem(profileStorageKey);
-        if (!local || local === "{}") {
+        // Usuária salvou algo enquanto a consulta rodava: não sobrescreve
+        if (seq !== profileSyncRef.current) return;
+
+        if (remote && Object.keys(remote).length > 0) {
+          // Banco tem perfil: hidrata este aparelho com ele
           setProfile(remote);
           localStorage.setItem(profileStorageKey, JSON.stringify(remote));
+        } else {
+          // Banco vazio e há perfil local antigo nunca sincronizado: sobe agora
+          const local = localStorage.getItem(profileStorageKey);
+          if (local && local !== "{}") {
+            try {
+              const parsed = JSON.parse(local);
+              if (parsed && Object.keys(parsed).length > 0) {
+                syncUserProfile(currentUser, parsed).catch(() => {});
+              }
+            } catch {}
+          }
         }
       }).catch(() => {});
     }
@@ -163,6 +179,7 @@ export default function UserProfilePanel({ currentUser, onTabChange, onUserUpdat
 
   // Save changes helper
   const saveProfile = (newProfile: UserProfileData) => {
+    const seq = ++profileSyncRef.current; // invalida consultas ao banco em andamento
     setProfile(newProfile);
     localStorage.setItem(profileStorageKey, JSON.stringify(newProfile));
 
@@ -174,12 +191,13 @@ export default function UserProfilePanel({ currentUser, onTabChange, onUserUpdat
       }
 
       syncUserProfile(updatedUser, newProfile).then(serverProfile => {
-        // O servidor troca a foto base64 por uma URL permanente do Storage;
-        // adota a URL local para não reenviar a foto a cada salvamento
-        if (serverProfile?.avatarUrl && serverProfile.avatarUrl !== newProfile.avatarUrl) {
-          const merged = { ...newProfile, avatarUrl: serverProfile.avatarUrl };
-          setProfile(merged);
-          localStorage.setItem(profileStorageKey, JSON.stringify(merged));
+        // O servidor devolve o perfil COMPLETO mesclado (foto já como URL
+        // permanente + campos preenchidos em outros aparelhos): adota-o,
+        // desde que não tenha havido outro salvamento nesse meio tempo
+        if (seq !== profileSyncRef.current) return;
+        if (serverProfile && Object.keys(serverProfile).length > 0) {
+          setProfile(serverProfile);
+          localStorage.setItem(profileStorageKey, JSON.stringify(serverProfile));
         }
       }).catch(err => {
         console.warn("[BackendSync User] Warning syncing preferences: ", err);

@@ -119,6 +119,13 @@ export default function App() {
     if (!currentUser) return;
 
     fetchUserProfile(currentUser.id).then(profile => {
+      // O banco é a fonte da verdade do perfil inteiro: hidrata a cópia
+      // local (usada pelo chat, álbum e foto de perfil) com o que está lá
+      if (profile && Object.keys(profile).length > 0) {
+        localStorage.setItem(`mb_user_profile_${currentUser.id}`, JSON.stringify(profile));
+        setUserAvatar(typeof profile.avatarUrl === "string" ? profile.avatarUrl : undefined);
+      }
+
       const dbAvatar = typeof profile?.baraoAvatarUrl === "string" ? profile.baraoAvatarUrl : "";
 
       if (dbAvatar) {

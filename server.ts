@@ -2611,28 +2611,25 @@ app.post("/api/profiles/:uid", requireAuth, async (req: AuthRequest, res) => {
       }
     }
 
-    // Preserva o retrato personalizado do Barão já gravado — o painel de
-    // perfil não envia esse campo e não deve apagá-lo
-    if (profileData && profileData.baraoAvatarUrl === undefined) {
-      try {
-        const [existingProf] = await db.select().from(perfisEditaveis).where(eq(perfisEditaveis.usuarioId, userDbId)).limit(1);
-        if (existingProf?.fatosBiografia) {
-          const existingJson = JSON.parse(existingProf.fatosBiografia);
-          if (existingJson?.baraoAvatarUrl) {
-            profileData.baraoAvatarUrl = existingJson.baraoAvatarUrl;
-          }
-        }
-      } catch {}
-    }
+    // MESCLA com o perfil já gravado: campos que este aparelho não enviou
+    // (ex.: baraoAvatarUrl, ou dados preenchidos em outro aparelho antes da
+    // sincronização) são preservados em vez de apagados
+    let existingJson: any = {};
+    try {
+      const [existingProf] = await db.select().from(perfisEditaveis).where(eq(perfisEditaveis.usuarioId, userDbId)).limit(1);
+      if (existingProf?.fatosBiografia) {
+        existingJson = JSON.parse(existingProf.fatosBiografia) || {};
+      }
+    } catch {}
+    const mergedProfile = { ...existingJson, ...profileData };
 
-    // Store entire profile object inside fatosBiografia column as JSON
     await db.insert(perfisEditaveis).values({
       usuarioId: userDbId,
-      fatosBiografia: JSON.stringify(profileData),
+      fatosBiografia: JSON.stringify(mergedProfile),
     }).onConflictDoUpdate({
       target: perfisEditaveis.usuarioId,
       set: {
-        fatosBiografia: JSON.stringify(profileData),
+        fatosBiografia: JSON.stringify(mergedProfile),
         updatedAt: new Date()
       }
     });
@@ -2646,8 +2643,8 @@ app.post("/api/profiles/:uid", requireAuth, async (req: AuthRequest, res) => {
       }).where(eq(usuarios.id, userDbId));
     }
 
-    // Devolve o perfil normalizado (avatarUrl já como URL pública)
-    res.json({ success: true, profile: profileData });
+    // Devolve o perfil completo mesclado (avatarUrl já como URL pública)
+    res.json({ success: true, profile: mergedProfile });
   } catch (error) {
     console.error("[Save Profile] Failed:", error);
     res.status(500).json({ error: "Falha ao salvar perfil." });
