@@ -561,10 +561,37 @@ export async function deleteCloudHistoryEntry(userId: string, title: string) {
   }
 }
 
+// A conversa é salva a cada mensagem: sem controle, várias sincronizações
+// rodam ao mesmo tempo e congestionam o navegador (que só abre 6 conexões
+// por site), deixando as respostas do chat lentas. Aqui garantimos uma
+// execução por vez, com uma repetição final para não perder nada.
+let chatSyncRunning = false;
+let chatSyncPending: { userId: string; threadId: string; messages: Message[] } | null = null;
+
+export async function syncConversations(userId: string, threadId: string, messages: Message[]) {
+  if (chatSyncRunning) {
+    // Guarda apenas o estado mais recente para rodar ao final
+    chatSyncPending = { userId, threadId, messages };
+    return;
+  }
+
+  chatSyncRunning = true;
+  try {
+    await syncConversationsNow(userId, threadId, messages);
+  } finally {
+    chatSyncRunning = false;
+    const pending = chatSyncPending;
+    chatSyncPending = null;
+    if (pending) {
+      syncConversations(pending.userId, pending.threadId, pending.messages).catch(() => {});
+    }
+  }
+}
+
 /**
  * Sync conversations with backend 'conversas' and 'mensagens' tables
  */
-export async function syncConversations(userId: string, threadId: string, messages: Message[]) {
+async function syncConversationsNow(userId: string, threadId: string, messages: Message[]) {
   try {
     // 1. Get user's chats
     const chatsRes = await apiFetch(`/api/chats?uid=${userId}`);

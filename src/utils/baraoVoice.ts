@@ -6,20 +6,19 @@
  * (chave ausente, falha ou tempo esgotado) — nesse caso quem chamou deve
  * recorrer à voz do navegador (speechSynthesis) como reserva.
  */
-// Disjuntor: quando o serviço de voz do kie.ai está fora do ar, todas as
-// tentativas ficam presas por ~45s antes de cair na voz do navegador. Após
-// duas falhas seguidas, pulamos a chamada por alguns minutos — a usuária
-// ouve a voz do navegador imediatamente, sem espera.
-const OUTAGE_COOLDOWN_MS = 5 * 60 * 1000;
+// Disjuntor: quando o serviço de voz do kie.ai falha, cada tentativa
+// gastaria ~30s e dezenas de requisições de acompanhamento, travando o
+// app. Na primeira falha já passamos a usar a voz do navegador na hora;
+// falhas seguidas prolongam a pausa. Um sucesso reabilita tudo.
+const FIRST_COOLDOWN_MS = 3 * 60 * 1000;
+const LONG_COOLDOWN_MS = 15 * 60 * 1000;
 let consecutiveFailures = 0;
 let outageUntil = 0;
 
 function noteFailure() {
   consecutiveFailures++;
-  if (consecutiveFailures >= 2) {
-    outageUntil = Date.now() + OUTAGE_COOLDOWN_MS;
-    console.warn("[BaraoVoice] Serviço de voz indisponível — usando a voz do navegador por alguns minutos.");
-  }
+  outageUntil = Date.now() + (consecutiveFailures >= 3 ? LONG_COOLDOWN_MS : FIRST_COOLDOWN_MS);
+  console.warn("[BaraoVoice] Serviço de voz indisponível — usando a voz do navegador por alguns minutos.");
 }
 
 export async function requestBaraoVoiceUrl(text: string): Promise<string | null> {
@@ -43,9 +42,10 @@ export async function requestBaraoVoiceUrl(text: string): Promise<string | null>
       return null;
     }
 
-    // A voz costuma ficar pronta em poucos segundos; espera até ~45s
-    for (let attempt = 0; attempt < 30; attempt++) {
-      await new Promise(resolve => setTimeout(resolve, 1500));
+    // A voz pronta leva poucos segundos; consulta a cada 2s por até ~30s
+    // (antes eram 30 consultas em 45s, o que congestionava o navegador)
+    for (let attempt = 0; attempt < 15; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
 
       const statusRes = await fetch(`/api/voice/status/${created.taskId}`);
       if (!statusRes.ok) continue;
