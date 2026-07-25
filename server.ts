@@ -1775,7 +1775,7 @@ Se "proposal" não estiver pronto ou não for o momento ideal de propor ainda, a
 // Inicia a geração de voz para um texto; devolve o taskId para o frontend acompanhar
 app.post("/api/voice/speak", async (req, res) => {
   try {
-    const { text, voice: voiceOverride, model: modelOverride } = req.body;
+    const { text, voice: voiceOverride } = req.body;
     if (!text || typeof text !== "string" || !text.trim()) {
       return res.status(400).json({ error: "text é obrigatório" });
     }
@@ -1805,10 +1805,11 @@ app.post("/api/voice/speak", async (req, res) => {
       similarity_boost: 0.75,
       speed: 0.92
     };
-    const ttsModel = (typeof modelOverride === "string" && modelOverride.trim()) || KIE_TTS_MODEL;
-    if (/turbo|flash/i.test(ttsModel)) ttsInput.language_code = "pt";
+    // Modelo só pela variável de ambiente: o endpoint é público e um
+    // modelo escolhido pelo cliente poderia consumir créditos caros
+    if (/turbo|flash/i.test(KIE_TTS_MODEL)) ttsInput.language_code = "pt";
 
-    const taskId = await createKieTask(ttsModel, ttsInput);
+    const taskId = await createKieTask(KIE_TTS_MODEL, ttsInput);
 
     res.json({ taskId });
   } catch (error: any) {
