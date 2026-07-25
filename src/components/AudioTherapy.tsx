@@ -3,16 +3,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { audioSessions } from "../data/sessions";
 import { synther } from "../utils/audioSynthesizer";
 import { 
   Play, Square, Headphones, Sparkles, Wind, Hourglass, Smile, HelpCircle,
   Music, Copy, Trash, Check, Volume2, Sliders, ChevronRight, RotateCcw,
   FileText, Flame, Disc, Heart, ArrowRight, CornerDownRight, ListMusic,
-  Send, AlertCircle, RefreshCw, Mic, MicOff, BookOpen, ArrowLeft, X
+  Send, AlertCircle, RefreshCw, Mic, MicOff, BookOpen, ArrowLeft, X,
+  Download, Radio
 } from "lucide-react";
 import { User } from "../types";
+import { requestBaraoSong } from "../utils/baraoMusic";
+import { syncSongs, saveCloudSong, deleteCloudSong } from "../utils/supabaseSync";
 import BaraoPaywall from "./BaraoPaywall";
 
 interface AudioTherapyProps {
@@ -33,6 +36,9 @@ interface Composition {
   baronComment: string;
   createdAt: string;
   genre: string;
+  // Canção gravada pelo Suno (URL permanente no Storage)
+  audioUrl?: string;
+  coverUrl?: string;
 }
 
 interface SavedMeditation {
@@ -85,6 +91,11 @@ export default function AudioTherapy({ currentUser, onPromptAuth, onUserUpdate, 
   const [theme, setTheme] = useState("");
   const [selectedGenre, setSelectedGenre] = useState("Bossa Nova Melancólica");
   const [isComposing, setIsComposing] = useState(false);
+  // Gravação da canção no estúdio (Suno)
+  const [recordingSongId, setRecordingSongId] = useState<string | null>(null);
+  const [songError, setSongError] = useState<string | null>(null);
+  // Número de série: só o resultado da sincronização mais recente vale
+  const songSyncRef = useRef(0);
   const [composingStep, setComposingStep] = useState(0);
 
   // Load creations from local storage
@@ -108,6 +119,34 @@ export default function AudioTherapy({ currentUser, onPromptAuth, onUserUpdate, 
     }
     return null;
   });
+
+  // Hidrata as composições a partir do banco (fonte da verdade): garante
+  // que as canções apareçam em qualquer aparelho
+  useEffect(() => {
+    if (!currentUser) return;
+    const storeKey = `mb_compositions_${currentUser.id}`;
+    const seq = ++songSyncRef.current;
+
+    const saved = localStorage.getItem(storeKey);
+    let local: Composition[] = [];
+    if (saved) {
+      try { local = JSON.parse(saved); } catch {}
+    }
+
+    syncSongs(currentUser.id, local).then(merged => {
+      if (seq !== songSyncRef.current) return;
+      setCompositions(merged);
+      localStorage.setItem(storeKey, JSON.stringify(merged));
+      setActiveComposition(prev => {
+        if (!prev) return merged.length > 0 ? merged[0] : null;
+        // Mantém a seleção, adotando a versão atualizada do banco
+        const refreshed = merged.find((m: Composition) => m.title === prev.title);
+        return refreshed || prev;
+      });
+    }).catch(err => {
+      console.warn("[BackendSync Songs] Falha ao sincronizar composições:", err);
+    });
+  }, [currentUser]);
 
   const [isReciting, setIsReciting] = useState(false);
   const [reciteType, setReciteType] = useState<"lyrics" | "comment" | null>(null);
@@ -781,6 +820,16 @@ export default function AudioTherapy({ currentUser, onPromptAuth, onUserUpdate, 
 
       const storeKey = currentUser ? `mb_compositions_${currentUser.id}` : "mb_compositions_guest";
       localStorage.setItem(storeKey, JSON.stringify(updated));
+
+      // Guarda a composição no banco (aparece em todos os aparelhos)
+      if (currentUser) {
+        saveCloudSong(currentUser.id, newComp).then(ok => {
+          if (!ok) return;
+          const marked = updated.map(c => (c.id === newComp.id ? { ...c, synced: true } : c));
+          setCompositions(marked);
+          localStorage.setItem(storeKey, JSON.stringify(marked));
+        }).catch(() => {});
+      }
       setTheme("");
     } catch (err) {
       console.error("Composer failed:", err);
@@ -789,17 +838,75 @@ export default function AudioTherapy({ currentUser, onPromptAuth, onUserUpdate, 
     }
   };
 
+  // Grava a canção de verdade no estúdio (kie.ai + Suno)
+  const handleGenerateSong = async (comp: Composition) => {
+    if (recordingSongId) return;
+    setSongError(null);
+    setRecordingSongId(comp.id);
+
+    // Silencia o recital falado para não competir com a canção
+    if (isReciting) handleStopRecital();
+
+    try {
+      const result = await requestBaraoSong(comp.title, comp.styleTags, comp.lyrics);
+
+      if ("error" in result) {
+        setSongError(result.error);
+        return;
+      }
+
+      const track = result.tracks[0];
+      const updated = compositions.map(c =>
+        c.id === comp.id
+          ? { ...c, audioUrl: track.audioUrl, coverUrl: track.imageUrl || undefined }
+          : c
+      );
+      setCompositions(updated);
+      setActiveComposition(prev =>
+        prev && prev.id === comp.id
+          ? { ...prev, audioUrl: track.audioUrl, coverUrl: track.imageUrl || undefined }
+          : prev
+      );
+
+      const storeKey = currentUser ? `mb_compositions_${currentUser.id}` : "mb_compositions_guest";
+      localStorage.setItem(storeKey, JSON.stringify(updated));
+
+      // Grava a canção (URL do Storage) na linha do banco
+      if (currentUser) {
+        const savedComp = updated.find(c => c.id === comp.id);
+        if (savedComp) {
+          saveCloudSong(currentUser.id, savedComp).catch(() => {});
+        }
+      }
+    } catch (err) {
+      console.error("[Ateliê] Falha ao gravar canção:", err);
+      setSongError("Não consegui gravar a canção neste instante. Tente novamente.");
+    } finally {
+      setRecordingSongId(null);
+    }
+  };
+
   const handleDeleteComposition = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
+    // Invalida sincronizações em voo para a composição não ressuscitar
+    songSyncRef.current++;
+    const toDelete = compositions.find(c => c.id === id);
     const updated = compositions.filter(c => c.id !== id);
     setCompositions(updated);
-    
+
     if (activeComposition?.id === id) {
       setActiveComposition(updated.length > 0 ? updated[0] : null);
     }
 
     const storeKey = currentUser ? `mb_compositions_${currentUser.id}` : "mb_compositions_guest";
     localStorage.setItem(storeKey, JSON.stringify(updated));
+
+    // Apaga também do banco, senão volta na próxima sincronização
+    if (currentUser && toDelete) {
+      deleteCloudSong(currentUser.id, toDelete.title).catch(err => {
+        console.warn("[BackendSync Songs Delete]: ", err);
+      });
+    }
 
     if (isReciting) {
       handleStopRecital();
@@ -1898,7 +2005,29 @@ export default function AudioTherapy({ currentUser, onPromptAuth, onUserUpdate, 
                           Silenciar
                         </button>
                       ) : (
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            onClick={() => handleGenerateSong(activeComposition)}
+                            disabled={!!recordingSongId}
+                            className={`flex items-center gap-1 px-2.5 py-1.5 rounded-sm text-[10px] uppercase font-mono tracking-widest font-bold transition duration-300 ${
+                              recordingSongId === activeComposition.id
+                                ? "bg-barao-gold/20 border border-barao-gold text-barao-gold cursor-wait"
+                                : "bg-barao-rose text-black hover:bg-barao-gold"
+                            } ${recordingSongId && recordingSongId !== activeComposition.id ? "opacity-50 cursor-not-allowed" : ""}`}
+                            title="O Barão grava esta canção de verdade, com melodia e voz cantada"
+                          >
+                            {recordingSongId === activeComposition.id ? (
+                              <>
+                                <RefreshCw className="h-3 w-3 mr-1 animate-spin" />
+                                Gravando...
+                              </>
+                            ) : (
+                              <>
+                                <Radio className="h-3 w-3 mr-1" />
+                                {activeComposition.audioUrl ? "Regravar Canção" : "Gravar Canção"}
+                              </>
+                            )}
+                          </button>
                           <button
                             onClick={() => handleStartRecital("comment")}
                             className="flex items-center gap-1 px-2.5 py-1.5 border border-barao-rose/50 hover:border-barao-rose/95 text-barao-gold text-[10px] uppercase font-mono tracking-widest rounded-sm font-bold transition duration-300"
@@ -1919,6 +2048,64 @@ export default function AudioTherapy({ currentUser, onPromptAuth, onUserUpdate, 
                       )}
                     </div>
                   </div>
+
+                  {/* Canção gravada no estúdio (Suno) */}
+                  {recordingSongId === activeComposition.id && (
+                    <div className="rounded-sm border border-barao-gold/30 bg-barao-gold/5 p-4 flex items-center gap-3 animate-pulse">
+                      <Disc className="h-5 w-5 text-barao-gold animate-spin duration-8000 shrink-0" />
+                      <div className="text-left">
+                        <p className="font-serif text-xs italic text-barao-gold">
+                          O Barão está no estúdio gravando sua canção...
+                        </p>
+                        <p className="font-mono text-[9px] uppercase tracking-wider text-zinc-500 mt-0.5">
+                          Melodia e voz levam de 1 a 3 minutos. Fique nesta tela.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {songError && (
+                    <div className="flex items-start gap-2 rounded-sm bg-red-950/20 border border-red-900/30 p-3 text-[11px] text-red-300">
+                      <AlertCircle className="h-3.5 w-3.5 text-red-400 shrink-0 mt-0.5" />
+                      <span>{songError}</span>
+                    </div>
+                  )}
+
+                  {activeComposition.audioUrl && (
+                    <div className="rounded-sm border border-barao-rose/25 bg-black/60 p-4 space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="font-mono text-[9px] uppercase tracking-widest text-barao-gold flex items-center gap-1.5">
+                          <Music className="h-3 w-3" />
+                          Canção gravada pelo Barão
+                        </span>
+                        <a
+                          href={activeComposition.audioUrl}
+                          download={`${activeComposition.title}.mp3`}
+                          className="flex items-center gap-1 text-[9px] uppercase font-mono tracking-widest text-zinc-400 hover:text-white transition"
+                          title="Baixar a canção"
+                        >
+                          <Download className="h-3 w-3" />
+                          Baixar
+                        </a>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        {activeComposition.coverUrl && (
+                          <img
+                            src={activeComposition.coverUrl}
+                            alt={activeComposition.title}
+                            referrerPolicy="no-referrer"
+                            className="h-14 w-14 rounded-sm object-cover border border-white/10 shrink-0"
+                          />
+                        )}
+                        <audio
+                          controls
+                          src={activeComposition.audioUrl}
+                          className="w-full"
+                          onPlay={() => { if (isReciting) handleStopRecital(); }}
+                        />
+                      </div>
+                    </div>
+                  )}
 
                   {/* Simulated wave animation / Cassette illustration */}
                   <div className="rounded-sm bg-black/60 p-4 border border-white/5 flex flex-col md:flex-row items-center gap-6 justify-between overflow-hidden relative">

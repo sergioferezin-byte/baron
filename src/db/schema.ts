@@ -125,6 +125,28 @@ export const albumEmocional = pgTable("album_emocional", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
+// Ateliê de Composição: canções escritas pelo Barão e gravadas via Suno
+export const composicoesMusicais = pgTable(
+  "composicoes_musicais",
+  {
+    id: serial("id").primaryKey(),
+    usuarioId: integer("usuario_id")
+      .notNull()
+      .references(() => usuarios.id, { onDelete: "cascade" }),
+    titulo: varchar("titulo", { length: 155 }).notNull(),
+    genero: varchar("genero", { length: 80 }),
+    estiloTags: text("estilo_tags"), // style do Suno (em inglês)
+    letra: text("letra").notNull(),
+    tempo: varchar("tempo", { length: 40 }),
+    instrumentacao: text("instrumentacao").array(),
+    comentarioBarao: text("comentario_barao"),
+    audioUrl: text("audio_url"), // canção gravada, no Supabase Storage
+    capaUrl: text("capa_url"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  },
+  (t) => [unique("composicoes_musicais_usuario_titulo_unique").on(t.usuarioId, t.titulo)]
+);
+
 export const imagensGeradas = pgTable("imagens_geradas", {
   id: serial("id").primaryKey(),
   albumId: integer("album_id")
@@ -222,6 +244,7 @@ export const usuariosRelations = relations(usuarios, ({ one, many }) => ({
   }),
   conversas: many(conversas),
   albuns: many(albumEmocional),
+  composicoes: many(composicoesMusicais),
   diarios: many(diarioAutomatico),
   perfilEmocional: one(perfisEmocionais, {
     fields: [usuarios.id],
@@ -296,6 +319,13 @@ export const imagensGeradasRelations = relations(imagensGeradas, ({ one }) => ({
 export const diarioAutomaticoRelations = relations(diarioAutomatico, ({ one }) => ({
   usuario: one(usuarios, {
     fields: [diarioAutomatico.usuarioId],
+    references: [usuarios.id],
+  }),
+}));
+
+export const composicoesMusicaisRelations = relations(composicoesMusicais, ({ one }) => ({
+  usuario: one(usuarios, {
+    fields: [composicoesMusicais.usuarioId],
     references: [usuarios.id],
   }),
 }));

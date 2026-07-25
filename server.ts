@@ -30,9 +30,10 @@ import {
   mensagens, 
   albumEmocional, 
   diarioAutomatico, 
-  perfisEmocionais, 
-  historicoEmocional, 
-  memoriasPersistentes 
+  perfisEmocionais,
+  historicoEmocional,
+  memoriasPersistentes,
+  composicoesMusicais
 } from "./src/db/schema.ts";
 import { eq, desc, and } from "drizzle-orm";
 
@@ -501,6 +502,95 @@ async function uploadDataUrlToStorage(dataUrl: string, folder: string = "refs"):
 const BARAO_REFERENCE_IMAGE_URL =
   process.env.BARAO_REFERENCE_IMAGE_URL ||
   "https://tzybwgiviuotvbknugsc.supabase.co/storage/v1/object/public/imagens/barao.png";
+
+// ===== Suno (kie.ai) — geração musical do Ateliê de Composição =====
+// A API do Suno no kie.ai é separada da API de jobs: usa /generate e
+// /generate/record-info, com seus próprios estados.
+const SUNO_MODEL = process.env.SUNO_MODEL || "V5";
+const MUSIC_BUCKET = "barao-musicas";
+
+async function createSunoTask(input: {
+  title: string;
+  style: string;
+  lyrics: string;
+  instrumental?: boolean;
+}): Promise<string> {
+  const key = process.env.KIE_API_KEY;
+  if (!key) {
+    throw new Error("⚠️ KIE_API_KEY environment variable is not defined.");
+  }
+
+  const instrumental = !!input.instrumental;
+  const body: Record<string, unknown> = {
+    customMode: true,
+    instrumental,
+    model: SUNO_MODEL,
+    // Limites da API: title 80, style 1000, prompt (letra) 5000
+    title: input.title.slice(0, 79),
+    style: input.style.slice(0, 990)
+  };
+  // Em modo instrumental a letra não é enviada
+  if (!instrumental) body.prompt = input.lyrics.slice(0, 4900);
+
+  const appUrl = (process.env.APP_URL || "").replace(/\/$/, "");
+  if (appUrl) body.callBackUrl = `${appUrl}/api/music/callback`;
+
+  const response = await fetch("https://api.kie.ai/api/v1/generate", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${key}`
+    },
+    body: JSON.stringify(body)
+  });
+
+  const data: any = await response.json().catch(() => null);
+  if (!response.ok || !data || data.code !== 200 || !data.data?.taskId) {
+    throw new Error(`Suno createTask error ${response.status}: ${JSON.stringify(data)}`);
+  }
+  return data.data.taskId;
+}
+
+interface SunoTrack {
+  audioUrl: string;
+  imageUrl: string | null;
+  duration: number | null;
+  title: string | null;
+}
+
+async function getSunoTask(taskId: string): Promise<{ status: string; tracks: SunoTrack[]; errorMessage: string }> {
+  const key = process.env.KIE_API_KEY;
+  if (!key) {
+    throw new Error("⚠️ KIE_API_KEY environment variable is not defined.");
+  }
+
+  const response = await fetch(
+    `https://api.kie.ai/api/v1/generate/record-info?taskId=${encodeURIComponent(taskId)}`,
+    { headers: { Authorization: `Bearer ${key}` } }
+  );
+
+  const data: any = await response.json().catch(() => null);
+  if (!response.ok || !data || data.code !== 200) {
+    throw new Error(`Suno recordInfo error ${response.status}: ${JSON.stringify(data)}`);
+  }
+
+  const info = data.data || {};
+  const tracks: SunoTrack[] = (info.response?.sunoData || [])
+    .filter((t: any) => t?.audioUrl)
+    .map((t: any) => ({
+      audioUrl: t.audioUrl,
+      imageUrl: t.imageUrl || null,
+      duration: typeof t.duration === "number" ? t.duration : null,
+      title: t.title || null
+    }));
+
+  return { status: info.status || "PENDING", tracks, errorMessage: info.errorMessage || "" };
+}
+
+// Os arquivos do Suno expiram em 14 dias — guarda a canção no Storage
+async function persistSunoAudio(sunoUrl: string): Promise<string> {
+  return persistKieMedia(sunoUrl, MUSIC_BUCKET, "songs", "audio/mpeg", "mp3");
+}
 
 // Aguarda uma tarefa do kie.ai concluir (polling server-side)
 async function waitKieTask(taskId: string, timeoutMs: number = 45000): Promise<string | null> {
@@ -1729,6 +1819,195 @@ app.get("/api/voice/status/:taskId", async (req, res) => {
   } catch (error: any) {
     console.error("[Voice Status] Failed:", error);
     res.status(500).json({ error: "Erro ao consultar a voz do Barão." });
+  }
+});
+
+// ==========================================
+// ATELIÊ DE COMPOSIÇÃO (kie.ai + Suno)
+// ==========================================
+
+// Inicia a geração da canção a partir da composição do Barão
+app.post("/api/music/generate", async (req, res) => {
+  try {
+    const { title, style, lyrics, instrumental } = req.body;
+    if (!title || typeof title !== "string" || !title.trim()) {
+      return res.status(400).json({ error: "title é obrigatório" });
+    }
+    if (!instrumental && (!lyrics || typeof lyrics !== "string" || !lyrics.trim())) {
+      return res.status(400).json({ error: "lyrics é obrigatória para canções cantadas" });
+    }
+
+    if (!process.env.KIE_API_KEY) {
+      return res.status(200).json({
+        isConfigError: true,
+        error: "KIE_API_KEY não configurada — a canção não pode ser gravada."
+      });
+    }
+
+    // O Suno entende melhor estilos em inglês; a letra permanece em português
+    const styleText = (style && String(style).trim()) || "slow acoustic ballad, melancholic, intimate, nylon guitar, soft male vocals";
+
+    const taskId = await createSunoTask({
+      title: String(title),
+      style: styleText,
+      lyrics: String(lyrics || ""),
+      instrumental: !!instrumental
+    });
+
+    res.json({ taskId });
+  } catch (error: any) {
+    console.error("[Music Generate] Failed:", error);
+    res.status(500).json({
+      error: "Erro ao iniciar a gravação da canção.",
+      detail: String(error?.message || error)
+    });
+  }
+});
+
+// Consulta o status da canção; quando pronta, persiste o áudio e devolve as faixas
+app.get("/api/music/status/:taskId", async (req, res) => {
+  try {
+    const task = await getSunoTask(req.params.taskId);
+
+    // O Suno entrega a primeira faixa antes de concluir tudo: já devolvemos
+    // para a usuária ouvir sem esperar a segunda versão
+    if ((task.status === "SUCCESS" || task.status === "FIRST_SUCCESS") && task.tracks.length > 0) {
+      const persisted = await Promise.all(
+        task.tracks.map(async t => ({
+          audioUrl: await persistSunoAudio(t.audioUrl),
+          imageUrl: t.imageUrl,
+          duration: t.duration,
+          title: t.title
+        }))
+      );
+      return res.json({ state: "success", tracks: persisted, partial: task.status === "FIRST_SUCCESS" });
+    }
+
+    if (task.status.includes("FAILED") || task.status.includes("ERROR") || task.status === "CALLBACK_EXCEPTION") {
+      console.error("[Music Status] Suno generation failed:", task.status, task.errorMessage);
+      const isSensitive = task.status === "SENSITIVE_WORD_ERROR";
+      return res.json({
+        state: "fail",
+        error: isSensitive
+          ? "A letra tocou em palavras que o estúdio musical não aceita. Peça ao Barão para reescrever a canção."
+          : task.errorMessage || "Falha ao gravar a canção."
+      });
+    }
+
+    res.json({ state: "processing" });
+  } catch (error: any) {
+    console.error("[Music Status] Failed:", error);
+    res.status(500).json({ error: "Erro ao consultar a gravação da canção." });
+  }
+});
+
+// Callback do Suno: apenas confirma o recebimento (o app consulta por polling)
+app.post("/api/music/callback", (req, res) => {
+  res.json({ received: true });
+});
+
+// ===== Composições do Ateliê (CRUD, banco como fonte da verdade) =====
+
+app.get("/api/songs", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const { uid } = req.query;
+    if (!uid) return res.status(400).json({ error: "uid é obrigatório" });
+    if (!ownsUid(req, uid as string)) {
+      return res.status(403).json({ error: "Acesso negado." });
+    }
+
+    const userDbId = await resolveUserIdByUid(uid as string);
+    if (!userDbId) return res.json([]);
+
+    const list = await db.select().from(composicoesMusicais)
+      .where(eq(composicoesMusicais.usuarioId, userDbId))
+      .orderBy(desc(composicoesMusicais.createdAt));
+
+    res.json(list.map(c => ({
+      id: c.id,
+      title: c.titulo,
+      genre: c.genero,
+      styleTags: c.estiloTags,
+      lyrics: c.letra,
+      tempo: c.tempo,
+      instrumentation: c.instrumentacao || [],
+      baronComment: c.comentarioBarao,
+      audioUrl: c.audioUrl,
+      coverUrl: c.capaUrl,
+      createdAt: c.createdAt
+    })));
+  } catch (error) {
+    console.error("[Get Songs] Failed:", error);
+    res.status(500).json({ error: "Erro ao carregar composições." });
+  }
+});
+
+app.post("/api/songs", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const { uid, title, genre, styleTags, lyrics, tempo, instrumentation, baronComment, audioUrl, coverUrl } = req.body;
+    if (!uid || !title || !lyrics) {
+      return res.status(400).json({ error: "uid, title e lyrics são obrigatórios" });
+    }
+    if (!ownsUid(req, uid)) {
+      return res.status(403).json({ error: "Acesso negado." });
+    }
+
+    const userDbId = await resolveUserIdByUid(uid);
+    if (!userDbId) return res.status(404).json({ error: "Usuário não sintonizado." });
+
+    const safeTitle = String(title).slice(0, 155);
+    const values = {
+      usuarioId: userDbId,
+      titulo: safeTitle,
+      genero: genre ? String(genre).slice(0, 80) : null,
+      estiloTags: styleTags || null,
+      letra: String(lyrics),
+      tempo: tempo ? String(tempo).slice(0, 40) : null,
+      instrumentacao: Array.isArray(instrumentation) ? instrumentation.map(String) : [],
+      comentarioBarao: baronComment || null,
+      audioUrl: audioUrl || null,
+      capaUrl: coverUrl || null
+    };
+
+    // Upsert por (usuário, título): regravar a canção atualiza a mesma linha
+    const [existing] = await db.select().from(composicoesMusicais)
+      .where(and(eq(composicoesMusicais.usuarioId, userDbId), eq(composicoesMusicais.titulo, safeTitle)))
+      .limit(1);
+
+    if (existing) {
+      const [updated] = await db.update(composicoesMusicais).set({
+        ...values,
+        // Não apaga a canção já gravada quando a atualização não traz áudio
+        audioUrl: values.audioUrl || existing.audioUrl,
+        capaUrl: values.capaUrl || existing.capaUrl
+      }).where(eq(composicoesMusicais.id, existing.id)).returning();
+      return res.json(updated);
+    }
+
+    const [created] = await db.insert(composicoesMusicais).values(values).returning();
+    res.json(created);
+  } catch (error) {
+    console.error("[Save Song] Failed:", error);
+    res.status(500).json({ error: "Erro ao salvar composição." });
+  }
+});
+
+app.delete("/api/songs/:id", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
+
+    const [song] = await db.select().from(composicoesMusicais).where(eq(composicoesMusicais.id, id)).limit(1);
+    if (!song) return res.status(404).json({ error: "Composição não encontrada." });
+    if (req.user && !(await userUidMatches(song.usuarioId, req.user.id))) {
+      return res.status(403).json({ error: "Acesso negado." });
+    }
+
+    await db.delete(composicoesMusicais).where(eq(composicoesMusicais.id, id));
+    res.json({ success: true });
+  } catch (error) {
+    console.error("[Delete Song] Failed:", error);
+    res.status(500).json({ error: "Erro ao excluir composição." });
   }
 });
 

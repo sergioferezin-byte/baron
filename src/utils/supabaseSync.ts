@@ -361,6 +361,169 @@ export async function syncHistoryEntries(userId: string, localHistories: History
   }
 }
 
+export interface CloudSong {
+  id: number;
+  title: string;
+  genre: string | null;
+  styleTags: string | null;
+  lyrics: string;
+  tempo: string | null;
+  instrumentation: string[];
+  baronComment: string | null;
+  audioUrl: string | null;
+  coverUrl: string | null;
+  createdAt?: string;
+}
+
+// Chave de comparação por título (o backend faz upsert por usuário+título)
+function songKey(title: string): string {
+  return (title || "").trim().toLowerCase().slice(0, 155);
+}
+
+/**
+ * Sync compositions with backend 'composicoes_musicais' table.
+ * Mesma regra do Álbum: o banco é a fonte da verdade — o que sumiu de lá
+ * foi apagado em outro aparelho; o conteúdo do banco prevalece.
+ */
+export async function syncSongs(userId: string, localSongs: any[]): Promise<any[]> {
+  try {
+    let cloudList: CloudSong[] = [];
+    let cloudOk = false;
+    try {
+      const res = await apiFetch(`/api/songs?uid=${userId}`);
+      if (res.ok) {
+        cloudList = await res.json();
+        cloudOk = true;
+      } else {
+        console.error("[BackendSync Error] Failed to list songs:", res.status);
+      }
+    } catch (listErr) {
+      console.error("[BackendSync Error] Failed to list songs:", listErr);
+    }
+
+    const reconciled: any[] = [];
+    const seen = new Set<string>();
+
+    for (const local of localSongs) {
+      const key = songKey(local.title);
+      if (seen.has(key)) continue; // colapsa duplicatas locais
+      seen.add(key);
+
+      const cloud = cloudOk ? cloudList.find(c => songKey(c.title) === key) : undefined;
+
+      if (cloud) {
+        // Banco vence no conteúdo (canção gravada em outro aparelho inclusive)
+        reconciled.push({
+          ...local,
+          title: cloud.title,
+          genre: cloud.genre || local.genre,
+          styleTags: cloud.styleTags || local.styleTags,
+          lyrics: cloud.lyrics || local.lyrics,
+          tempo: cloud.tempo || local.tempo,
+          instrumentation: cloud.instrumentation?.length ? cloud.instrumentation : local.instrumentation,
+          baronComment: cloud.baronComment || local.baronComment,
+          audioUrl: cloud.audioUrl || local.audioUrl,
+          coverUrl: cloud.coverUrl || local.coverUrl,
+          synced: true
+        });
+        continue;
+      }
+
+      if (cloudOk && local.synced) {
+        continue; // apagada em outro aparelho
+      }
+
+      const postRes = await apiFetch("/api/songs", {
+        method: "POST",
+        body: JSON.stringify({
+          uid: userId,
+          title: local.title,
+          genre: local.genre,
+          styleTags: local.styleTags,
+          lyrics: local.lyrics,
+          tempo: local.tempo,
+          instrumentation: local.instrumentation,
+          baronComment: local.baronComment,
+          audioUrl: local.audioUrl || null,
+          coverUrl: local.coverUrl || null
+        })
+      });
+      if (!postRes.ok) {
+        console.error(`[BackendSync Error] Failed to save song "${local.title}":`, postRes.status);
+      }
+      reconciled.push({ ...local, synced: postRes.ok ? true : local.synced });
+    }
+
+    // Composições que só existem no banco (outros aparelhos)
+    for (const cloud of cloudList) {
+      const key = songKey(cloud.title);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      reconciled.push({
+        id: "cloud-" + cloud.id,
+        title: cloud.title,
+        genre: cloud.genre || "",
+        styleTags: cloud.styleTags || "",
+        lyrics: cloud.lyrics || "",
+        tempo: cloud.tempo || "",
+        instrumentation: cloud.instrumentation || [],
+        baronComment: cloud.baronComment || "",
+        audioUrl: cloud.audioUrl || undefined,
+        coverUrl: cloud.coverUrl || undefined,
+        createdAt: cloud.createdAt
+          ? new Date(cloud.createdAt).toLocaleDateString("pt-BR", { hour: "2-digit", minute: "2-digit" })
+          : "",
+        synced: true
+      });
+    }
+
+    // Mais recentes primeiro (o banco já devolve ordenado; garante no merge)
+    return reconciled;
+  } catch (error) {
+    console.error("[BackendSync Error] Failed to sync songs:", error);
+    return localSongs;
+  }
+}
+
+/** Salva/atualiza uma composição no banco (upsert por título). */
+export async function saveCloudSong(userId: string, song: any): Promise<boolean> {
+  try {
+    const res = await apiFetch("/api/songs", {
+      method: "POST",
+      body: JSON.stringify({
+        uid: userId,
+        title: song.title,
+        genre: song.genre,
+        styleTags: song.styleTags,
+        lyrics: song.lyrics,
+        tempo: song.tempo,
+        instrumentation: song.instrumentation,
+        baronComment: song.baronComment,
+        audioUrl: song.audioUrl || null,
+        coverUrl: song.coverUrl || null
+      })
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Apaga do banco todas as composições com o mesmo título. */
+export async function deleteCloudSong(userId: string, title: string) {
+  try {
+    const res = await apiFetch(`/api/songs?uid=${userId}`);
+    if (!res.ok) return;
+    const cloudList: CloudSong[] = await res.json();
+    const targets = cloudList.filter(c => songKey(c.title) === songKey(title));
+    for (const target of targets) {
+      await apiFetch(`/api/songs/${target.id}`, { method: "DELETE" });
+    }
+  } catch (error) {
+    console.error("[BackendSync Error] Failed to delete song:", error);
+  }
+}
+
 /**
  * Upload a user photo (base64 data URL) to the backend Storage and return
  * its lightweight public URL, or null on failure.
