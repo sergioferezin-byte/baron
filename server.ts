@@ -357,9 +357,10 @@ async function callDeepSeek(
 // Tarefas são assíncronas: createTask devolve um taskId e o resultado é
 // consultado em recordInfo até ficar pronto.
 const KIE_API_BASE = "https://api.kie.ai/api/v1";
-// Turbo 2.5: mesmas vozes da multilingual-v2 pela metade do preço, com
-// enforcement de idioma (pt). Troque via KIE_TTS_MODEL se quiser outra.
-const KIE_TTS_MODEL = process.env.KIE_TTS_MODEL || "elevenlabs/text-to-speech-turbo-2-5";
+// multilingual-v2 é o modelo comprovado em produção. O turbo-2-5 custa
+// metade, mas suas tarefas ficaram presas em "waiting" — só usar via
+// KIE_TTS_MODEL depois de validar.
+const KIE_TTS_MODEL = process.env.KIE_TTS_MODEL || "elevenlabs/text-to-speech-multilingual-v2";
 // Voz padrão: "Hank — Deep and Engaging Narrator". Troque via KIE_TTS_VOICE.
 const KIE_TTS_VOICE = process.env.KIE_TTS_VOICE || "6F5Zhi321D3Oq7v1oNT4";
 
@@ -385,7 +386,7 @@ async function createKieTask(model: string, input: Record<string, unknown>): Pro
   return data.data.taskId;
 }
 
-async function getKieTask(taskId: string): Promise<{ state: string; resultUrls: string[]; failMsg: string }> {
+async function getKieTask(taskId: string): Promise<{ state: string; resultUrls: string[]; failMsg: string; rawState: string }> {
   const key = process.env.KIE_API_KEY;
   if (!key) {
     throw new Error("⚠️ KIE_API_KEY environment variable is not defined.");
@@ -404,12 +405,26 @@ async function getKieTask(taskId: string): Promise<{ state: string; resultUrls: 
   let resultUrls: string[] = [];
   if (info.resultJson) {
     try {
-      resultUrls = JSON.parse(info.resultJson)?.resultUrls || [];
+      const parsed = typeof info.resultJson === "string" ? JSON.parse(info.resultJson) : info.resultJson;
+      resultUrls = parsed?.resultUrls || parsed?.resultUrl || [];
+      if (typeof resultUrls === "string") resultUrls = [resultUrls];
     } catch {
       resultUrls = [];
     }
   }
-  return { state: info.state || "waiting", resultUrls, failMsg: info.failMsg || "" };
+
+  // O kie.ai varia a grafia do estado entre modelos (success/SUCCESS/
+  // completed, fail/FAILED/error): normaliza para success | fail | waiting
+  const raw = String(info.state || info.status || "waiting");
+  const lower = raw.toLowerCase();
+  let state: "success" | "fail" | "waiting" = "waiting";
+  if (lower.includes("success") || lower.includes("complet") || resultUrls.length > 0) {
+    state = "success";
+  } else if (lower.includes("fail") || lower.includes("error")) {
+    state = "fail";
+  }
+
+  return { state, resultUrls, failMsg: info.failMsg || info.errorMessage || "", rawState: raw };
 }
 
 // Os arquivos gerados pelo kie.ai expiram em ~24h; salvamos no Supabase Storage
@@ -1780,14 +1795,18 @@ app.post("/api/voice/speak", async (req, res) => {
       .trim()
       .slice(0, 4900);
 
-    const taskId = await createKieTask(KIE_TTS_MODEL, {
+    // language_code só é aceito pelos modelos turbo/flash — enviar para o
+    // multilingual-v2 deixa a tarefa presa sem nunca concluir
+    const ttsInput: Record<string, unknown> = {
       text: cleanText,
       voice: KIE_TTS_VOICE,
       stability: 0.5,
       similarity_boost: 0.75,
-      speed: 0.92,
-      language_code: "pt"
-    });
+      speed: 0.92
+    };
+    if (/turbo|flash/i.test(KIE_TTS_MODEL)) ttsInput.language_code = "pt";
+
+    const taskId = await createKieTask(KIE_TTS_MODEL, ttsInput);
 
     res.json({ taskId });
   } catch (error: any) {
@@ -1811,11 +1830,12 @@ app.get("/api/voice/status/:taskId", async (req, res) => {
     }
 
     if (task.state === "fail") {
-      console.error("[Voice Status] kie.ai generation failed:", task.failMsg);
+      console.error("[Voice Status] kie.ai generation failed:", task.rawState, task.failMsg);
       return res.json({ state: "fail", error: task.failMsg || "Falha na geração de voz." });
     }
 
-    res.json({ state: "processing" });
+    // rawState ajuda a diagnosticar tarefas que não avançam
+    res.json({ state: "processing", rawState: task.rawState });
   } catch (error: any) {
     console.error("[Voice Status] Failed:", error);
     res.status(500).json({ error: "Erro ao consultar a voz do Barão." });
