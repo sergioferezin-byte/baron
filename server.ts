@@ -1775,7 +1775,7 @@ Se "proposal" não estiver pronto ou não for o momento ideal de propor ainda, a
 // Inicia a geração de voz para um texto; devolve o taskId para o frontend acompanhar
 app.post("/api/voice/speak", async (req, res) => {
   try {
-    const { text } = req.body;
+    const { text, voice: voiceOverride } = req.body;
     if (!text || typeof text !== "string" || !text.trim()) {
       return res.status(400).json({ error: "text é obrigatório" });
     }
@@ -1799,7 +1799,8 @@ app.post("/api/voice/speak", async (req, res) => {
     // multilingual-v2 deixa a tarefa presa sem nunca concluir
     const ttsInput: Record<string, unknown> = {
       text: cleanText,
-      voice: KIE_TTS_VOICE,
+      // voiceOverride permite testar vozes sem novo deploy
+      voice: (typeof voiceOverride === "string" && voiceOverride.trim()) || KIE_TTS_VOICE,
       stability: 0.5,
       similarity_boost: 0.75,
       speed: 0.92
