@@ -18,6 +18,8 @@ class AudioSynthesizer {
   private pianoTimer: any = null;
   private fireTimer: any = null;
   private currentAudio: HTMLAudioElement | null = null;
+  // Evita esperar o carregamento das vozes mais de uma vez por fala
+  private voicesWaited = false;
 
   public initContext() {
     if (!this.ctx) {
@@ -303,14 +305,78 @@ class AudioSynthesizer {
     }
   }
 
+  /**
+   * Escolhe a voz masculina em português do navegador.
+   *
+   * Os nomes variam por sistema (Windows, Android, iOS/macOS), e nenhum
+   * navegador informa o gênero da voz — daí as listas explícitas. Também
+   * evita vozes femininas conhecidas, que eram escolhidas por padrão e
+   * faziam O Barão falar com voz de mulher.
+   */
+  private pickMaleVoice(): { voice: SpeechSynthesisVoice | null; isMale: boolean } {
+    const voices = window.speechSynthesis.getVoices() || [];
+    const ptVoices = voices.filter(v => v.lang && v.lang.toLowerCase().startsWith("pt"));
+    if (ptVoices.length === 0) return { voice: null, isMale: false };
+
+    // Prefere pt-BR sobre pt-PT
+    const brFirst = [
+      ...ptVoices.filter(v => v.lang.toLowerCase().replace("_", "-") === "pt-br"),
+      ...ptVoices.filter(v => v.lang.toLowerCase().replace("_", "-") !== "pt-br")
+    ];
+
+    const MALE_NAMES = [
+      "daniel", "ricardo", "felipe", "antonio", "antónio", "joão", "joao",
+      "eddy", "reed", "rocko", "grandpa", "fernando", "bruno", "marcos",
+      "paulo", "carlos", "diego", "júlio", "julio", "heitor", "lucas"
+    ];
+    const FEMALE_NAMES = [
+      "maria", "helena", "luciana", "joana", "fernanda", "camila", "ana",
+      "francisca", "catarina", "sandy", "shelley", "flo", "grandma",
+      "vitoria", "vitória", "bella", "isabela", "leticia", "letícia"
+    ];
+
+    const isMaleName = (name: string) => {
+      const n = name.toLowerCase();
+      if (n.includes("male") && !n.includes("female")) return true;
+      if (FEMALE_NAMES.some(f => n.includes(f))) return false;
+      return MALE_NAMES.some(m => n.includes(m));
+    };
+
+    const male = brFirst.find(v => isMaleName(v.name));
+    if (male) return { voice: male, isMale: true };
+
+    // Sem voz masculina: usa a primeira em português (timbre é grave depois)
+    const notFemale = brFirst.find(v => !FEMALE_NAMES.some(f => v.name.toLowerCase().includes(f)));
+    return { voice: notFemale || brFirst[0], isMale: false };
+  }
+
   // Easy method to perform Text-to-Speech in Brazilian Portuguese in the browser
   // Uses SpeechSynthesis UTTERANCE which reads O Barão's responses beautifully
   public speakText(text: string, onBoundary?: (charIndex: number) => void, onEnd?: () => void) {
     if (!window.speechSynthesis) return;
-    
+
+    // A lista de vozes carrega de forma assíncrona: na primeira chamada ela
+    // costuma vir vazia e o navegador usaria a voz padrão (quase sempre
+    // feminina). Espera o carregamento antes de falar.
+    const voicesReady = (window.speechSynthesis.getVoices() || []).length > 0;
+    if (!voicesReady && !this.voicesWaited) {
+      this.voicesWaited = true;
+      const speakWhenReady = () => {
+        window.speechSynthesis.onvoiceschanged = null;
+        this.speakText(text, onBoundary, onEnd);
+      };
+      window.speechSynthesis.onvoiceschanged = speakWhenReady;
+      // Rede de segurança caso o evento não dispare
+      setTimeout(() => {
+        if (window.speechSynthesis.onvoiceschanged === speakWhenReady) speakWhenReady();
+      }, 800);
+      return;
+    }
+    this.voicesWaited = false;
+
     // Stop any ongoing speech
     window.speechSynthesis.cancel();
-    
+
     // Strip markdown formatting simple regex
     const cleanText = text
       .replace(/\*\*/g, "")
@@ -320,20 +386,13 @@ class AudioSynthesizer {
 
     const utterance = new SpeechSynthesisUtterance(cleanText);
     utterance.lang = "pt-BR";
-    
-    // Try to find a male, tona-respeitoso Brazilian speaker if available
-    const voices = window.speechSynthesis.getVoices();
-    const ptVoices = voices.filter(v => v.lang.startsWith("pt"));
-    // Look for standard deep voices, or default to any brazilian portuguese
-    const maleVoice = ptVoices.find(v => v.name.toLowerCase().includes("male") || v.name.toLowerCase().includes("daniel") || v.name.toLowerCase().includes("antonio"));
-    if (maleVoice) {
-      utterance.voice = maleVoice;
-    } else if (ptVoices.length > 0) {
-      utterance.voice = ptVoices[0];
-    }
-    
+
+    const chosen = this.pickMaleVoice();
+    if (chosen.voice) utterance.voice = chosen.voice;
+
     utterance.rate = 0.88; // Calm, slightly measured breathing cadence
-    utterance.pitch = 0.85; // Deeper tamber for warmth
+    // Sem voz masculina disponível, o timbre grave disfarça a voz feminina
+    utterance.pitch = chosen.isMale ? 0.85 : 0.6;
 
     if (onBoundary) {
       utterance.onboundary = (e) => {
