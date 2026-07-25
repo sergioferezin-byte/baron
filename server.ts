@@ -607,6 +607,59 @@ async function persistSunoAudio(sunoUrl: string): Promise<string> {
   return persistKieMedia(sunoUrl, MUSIC_BUCKET, "songs", "audio/mpeg", "mp3");
 }
 
+// ===== Voz reserva do Barão (Gemini TTS) =====
+// Usada quando o kie.ai está indisponível: garante voz masculina real em
+// qualquer aparelho (no celular o navegador só costuma ter voz feminina).
+const GEMINI_TTS_MODEL = process.env.GEMINI_TTS_MODEL || "gemini-2.5-flash-preview-tts";
+const GEMINI_TTS_VOICE = process.env.GEMINI_TTS_VOICE || "Charon"; // masculina, grave
+
+// O Gemini devolve PCM cru; o navegador precisa do cabeçalho WAV
+function pcmToWav(pcm: Buffer, sampleRate = 24000, channels = 1, bitsPerSample = 16): Buffer {
+  const blockAlign = (channels * bitsPerSample) / 8;
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20); // PCM
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * blockAlign, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([header, pcm]);
+}
+
+async function uploadBufferToStorage(
+  buffer: Buffer,
+  bucket: string,
+  folder: string,
+  contentType: string,
+  ext: string
+): Promise<string | null> {
+  if (!supabaseAdmin) return null;
+  try {
+    if (!readyBuckets.has(bucket)) {
+      await supabaseAdmin.storage.createBucket(bucket, { public: true }).catch(() => {});
+      readyBuckets.add(bucket);
+    }
+    const filePath = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
+    const { error } = await supabaseAdmin.storage.from(bucket).upload(filePath, buffer, { contentType });
+    if (error) {
+      console.error("[Storage] Upload failed:", error.message);
+      return null;
+    }
+    const { data } = supabaseAdmin.storage.from(bucket).getPublicUrl(filePath);
+    return data?.publicUrl || null;
+  } catch (err) {
+    console.error("[Storage] Upload failed:", err);
+    return null;
+  }
+}
+
 // Aguarda uma tarefa do kie.ai concluir (polling server-side)
 async function waitKieTask(taskId: string, timeoutMs: number = 45000): Promise<string | null> {
   const start = Date.now();
@@ -1842,6 +1895,58 @@ app.get("/api/voice/status/:taskId", async (req, res) => {
   } catch (error: any) {
     console.error("[Voice Status] Failed:", error);
     res.status(500).json({ error: "Erro ao consultar a voz do Barão." });
+  }
+});
+
+// Voz reserva (Gemini TTS): resposta síncrona, usada quando o kie.ai falha.
+// Garante voz masculina em qualquer aparelho — no celular a voz do
+// navegador em português costuma ser apenas feminina.
+app.post("/api/voice/fallback", async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text || typeof text !== "string" || !text.trim()) {
+      return res.status(400).json({ error: "text é obrigatório" });
+    }
+    if (!process.env.GEMINI_API_KEY) {
+      return res.status(200).json({ isConfigError: true, error: "GEMINI_API_KEY não configurada." });
+    }
+
+    const cleanText = text
+      .replace(/\*\*/g, "")
+      .replace(/\*/g, "")
+      .replace(/#/g, "")
+      .trim()
+      .slice(0, 3000);
+
+    const ai = getGeminiClient();
+    const response = await ai.models.generateContent({
+      model: GEMINI_TTS_MODEL,
+      // A instrução de estilo molda o timbre do Barão
+      contents: `Diga com voz masculina grave, calorosa e acolhedora, em ritmo pausado: ${cleanText}`,
+      config: {
+        responseModalities: ["AUDIO"],
+        speechConfig: {
+          voiceConfig: { prebuiltVoiceConfig: { voiceName: GEMINI_TTS_VOICE } }
+        }
+      } as any
+    });
+
+    const base64 = (response as any)?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    if (!base64) {
+      console.error("[Voice Fallback] Gemini não retornou áudio.");
+      return res.status(500).json({ error: "Voz reserva indisponível." });
+    }
+
+    const wav = pcmToWav(Buffer.from(base64, "base64"));
+    const audioUrl = await uploadBufferToStorage(wav, VOICE_BUCKET, "gemini", "audio/wav", "wav");
+    if (!audioUrl) {
+      return res.status(500).json({ error: "Falha ao guardar a voz reserva." });
+    }
+
+    res.json({ audioUrl });
+  } catch (error: any) {
+    console.error("[Voice Fallback] Failed:", error);
+    res.status(500).json({ error: "Erro ao gerar a voz reserva.", detail: String(error?.message || error) });
   }
 });
 

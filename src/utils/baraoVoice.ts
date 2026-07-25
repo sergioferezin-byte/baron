@@ -21,9 +21,29 @@ function noteFailure() {
   console.warn("[BaraoVoice] Serviço de voz indisponível — usando a voz do navegador por alguns minutos.");
 }
 
+/**
+ * Voz reserva do Barão (Gemini TTS, síncrona): usada quando o kie.ai está
+ * indisponível. Garante voz masculina em qualquer aparelho — a voz do
+ * navegador no celular costuma ser somente feminina.
+ */
+async function requestFallbackVoiceUrl(text: string): Promise<string | null> {
+  try {
+    const res = await fetch("/api/voice/fallback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text })
+    });
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => null);
+    return data?.audioUrl || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function requestBaraoVoiceUrl(text: string): Promise<string | null> {
-  // Serviço reconhecidamente fora do ar: nem tenta, responde na hora
-  if (Date.now() < outageUntil) return null;
+  // Serviço principal reconhecidamente fora do ar: vai direto à reserva
+  if (Date.now() < outageUntil) return requestFallbackVoiceUrl(text);
 
   try {
     const createRes = await fetch("/api/voice/speak", {
@@ -33,13 +53,13 @@ export async function requestBaraoVoiceUrl(text: string): Promise<string | null>
     });
     if (!createRes.ok) {
       noteFailure();
-      return null;
+      return requestFallbackVoiceUrl(text);
     }
 
     const created = await createRes.json();
     if (!created?.taskId) {
       noteFailure();
-      return null;
+      return requestFallbackVoiceUrl(text);
     }
 
     // A voz pronta leva poucos segundos; consulta a cada 2s por até ~30s
@@ -58,15 +78,15 @@ export async function requestBaraoVoiceUrl(text: string): Promise<string | null>
       }
       if (status.state === "fail") {
         noteFailure();
-        return null;
+        return requestFallbackVoiceUrl(text);
       }
     }
 
     // Tempo esgotado sem resposta: trata como indisponibilidade
     noteFailure();
-    return null;
+    return requestFallbackVoiceUrl(text);
   } catch {
     noteFailure();
-    return null;
+    return requestFallbackVoiceUrl(text);
   }
 }
