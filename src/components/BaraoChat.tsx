@@ -869,8 +869,8 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
     }
   };
 
-  // Voice playback toggling — tenta a voz realista (kie.ai/ElevenLabs) e
-  // recorre à voz do navegador se indisponível
+  // Voice playback toggling — tenta a voz realista (Azure, com Gemini de
+  // reserva) e recorre à voz do navegador se nenhuma estiver disponível
   const speechRequestRef = useRef(0);
 
   const speakResponse = async (id: string, text: string) => {

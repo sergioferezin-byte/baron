@@ -607,9 +607,30 @@ async function persistSunoAudio(sunoUrl: string): Promise<string> {
   return persistKieMedia(sunoUrl, MUSIC_BUCKET, "songs", "audio/mpeg", "mp3");
 }
 
+// ===== Voz principal do Barão (Azure AI Speech) =====
+// Voz masculina brasileira de verdade, síncrona (um pedido devolve o MP3)
+// e com camada gratuita permanente de 500 mil caracteres/mês. Substituiu o
+// kie.ai/ElevenLabs, cuja ponte de TTS está fora do ar desde jul/2026.
+const AZURE_SPEECH_REGION = process.env.AZURE_SPEECH_REGION || "brazilsouth";
+// Vozes masculinas pt-BR: Antonio, Donato, Fabio, Humberto, Julio,
+// Nicolau, Valerio. Trocar por AZURE_TTS_VOICE sem novo deploy.
+const AZURE_TTS_VOICE = process.env.AZURE_TTS_VOICE || "pt-BR-AntonioNeural";
+// O Barão fala pausado; equivale ao speed 0.92 que usávamos no ElevenLabs
+const AZURE_TTS_RATE = process.env.AZURE_TTS_RATE || "-8%";
+
+// O texto entra dentro de um SSML: sem escapar, um & ou < quebra o XML
+function escapeXml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
 // ===== Voz reserva do Barão (Gemini TTS) =====
-// Usada quando o kie.ai está indisponível: garante voz masculina real em
-// qualquer aparelho (no celular o navegador só costuma ter voz feminina).
+// Usada quando o Azure não está configurado ou falha: garante voz masculina
+// em qualquer aparelho (no celular o navegador só costuma ter voz feminina).
 const GEMINI_TTS_MODEL = process.env.GEMINI_TTS_MODEL || "gemini-2.5-flash-preview-tts";
 const GEMINI_TTS_VOICE = process.env.GEMINI_TTS_VOICE || "Charon"; // masculina, grave
 
@@ -1908,7 +1929,79 @@ app.get("/api/voice/status/:taskId", async (req, res) => {
   }
 });
 
-// Voz reserva (Gemini TTS): resposta síncrona, usada quando o kie.ai falha.
+// Voz principal (Azure AI Speech): síncrona — um pedido devolve o MP3, sem
+// createTask nem polling. Responde em menos de um segundo.
+app.post("/api/voice/azure", async (req, res) => {
+  try {
+    const { text, voice: voiceOverride } = req.body;
+    if (!text || typeof text !== "string" || !text.trim()) {
+      return res.status(400).json({ error: "text é obrigatório" });
+    }
+
+    const key = process.env.AZURE_SPEECH_KEY;
+    if (!key) {
+      // isConfigError (200) para o cliente cair na reserva sem tratar como erro
+      return res.status(200).json({ isConfigError: true, error: "AZURE_SPEECH_KEY não configurada." });
+    }
+
+    // Remove marcações de markdown; o limite de SSML do Azure é generoso
+    const cleanText = text
+      .replace(/\*\*/g, "")
+      .replace(/\*/g, "")
+      .replace(/#/g, "")
+      .trim()
+      .slice(0, 4900);
+
+    // voiceOverride permite ouvir as vozes masculinas sem novo deploy;
+    // o padrão vem da env var. Só aceita vozes pt-BR.
+    const requested = typeof voiceOverride === "string" ? voiceOverride.trim() : "";
+    const voice = /^pt-BR-[A-Za-z]{1,30}Neural$/.test(requested) ? requested : AZURE_TTS_VOICE;
+
+    const ssml =
+      `<speak version='1.0' xml:lang='pt-BR'>` +
+      `<voice name='${voice}'>` +
+      `<prosody rate='${AZURE_TTS_RATE}'>${escapeXml(cleanText)}</prosody>` +
+      `</voice></speak>`;
+
+    const response = await fetch(
+      `https://${AZURE_SPEECH_REGION}.tts.speech.microsoft.com/cognitiveservices/v1`,
+      {
+        method: "POST",
+        headers: {
+          "Ocp-Apim-Subscription-Key": key,
+          "Content-Type": "application/ssml+xml",
+          "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
+          "User-Agent": "meu-barao"
+        },
+        body: ssml
+      }
+    );
+
+    if (!response.ok) {
+      // 401/403 = chave ou região erradas; 429 = cota gratuita esgotada
+      const detail = await response.text().catch(() => "");
+      console.error("[Voice Azure] HTTP", response.status, detail.slice(0, 300));
+      return res.status(502).json({
+        error: "Voz principal indisponível.",
+        status: response.status,
+        detail: detail.slice(0, 300)
+      });
+    }
+
+    const mp3 = Buffer.from(await response.arrayBuffer());
+    const audioUrl = await uploadBufferToStorage(mp3, VOICE_BUCKET, "azure", "audio/mpeg", "mp3");
+    if (!audioUrl) {
+      return res.status(500).json({ error: "Falha ao guardar a voz do Barão." });
+    }
+
+    res.json({ audioUrl, voice });
+  } catch (error: any) {
+    console.error("[Voice Azure] Failed:", error);
+    res.status(500).json({ error: "Erro ao gerar a voz do Barão.", detail: String(error?.message || error) });
+  }
+});
+
+// Voz reserva (Gemini TTS): resposta síncrona, usada quando o Azure falha.
 // Garante voz masculina em qualquer aparelho — no celular a voz do
 // navegador em português costuma ser apenas feminina.
 app.post("/api/voice/fallback", async (req, res) => {
@@ -2772,7 +2865,11 @@ app.get("/api/health", async (req, res) => {
     supabaseAuth: supabaseAdmin ? "ok" : "não configurado — verifique SUPABASE_SERVICE_ROLE_KEY",
     geminiKeyConfigured: !!process.env.GEMINI_API_KEY,
     deepseekKeyConfigured: !!process.env.DEEPSEEK_API_KEY,
-    kieKeyConfigured: !!process.env.KIE_API_KEY
+    kieKeyConfigured: !!process.env.KIE_API_KEY,
+    // voz: azure é a principal; sem ela o Barão cai na reserva do Gemini
+    azureSpeechConfigured: !!process.env.AZURE_SPEECH_KEY,
+    azureSpeechRegion: AZURE_SPEECH_REGION,
+    azureTtsVoice: AZURE_TTS_VOICE
   });
 });
 
