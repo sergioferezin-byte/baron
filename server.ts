@@ -1825,6 +1825,15 @@ Se "proposal" não estiver pronto ou não for o momento ideal de propor ainda, a
 // VOZ DO BARÃO (kie.ai + ElevenLabs TTS)
 // ==========================================
 
+// Permite testar outros modelos de voz sem novo deploy. O endpoint é
+// público, então só aceitamos modelos de text-to-speech da ElevenLabs:
+// um modelo livre deixaria qualquer um consumir créditos de imagem/vídeo.
+function resolveTtsModel(requested: unknown): string {
+  if (typeof requested !== "string") return KIE_TTS_MODEL;
+  const candidate = requested.trim();
+  return /^elevenlabs\/text-to-speech-[a-z0-9-]{1,40}$/.test(candidate) ? candidate : KIE_TTS_MODEL;
+}
+
 // Inicia a geração de voz para um texto; devolve o taskId para o frontend acompanhar
 app.post("/api/voice/speak", async (req, res) => {
   try {
@@ -1858,16 +1867,17 @@ app.post("/api/voice/speak", async (req, res) => {
       similarity_boost: 0.75,
       speed: 0.92
     };
-    // Modelo só pela variável de ambiente: o endpoint é público e um
-    // modelo escolhido pelo cliente poderia consumir créditos caros
-    if (/turbo|flash/i.test(KIE_TTS_MODEL)) ttsInput.language_code = "pt";
+    const model = resolveTtsModel(req.body?.model);
+    if (/turbo|flash/i.test(model)) ttsInput.language_code = "pt";
 
-    const taskId = await createKieTask(KIE_TTS_MODEL, ttsInput);
+    const taskId = await createKieTask(model, ttsInput);
 
-    res.json({ taskId });
+    // model na resposta ajuda a diagnosticar qual variante gerou o áudio
+    res.json({ taskId, model });
   } catch (error: any) {
     console.error("[Voice Speak] Failed:", error);
-    res.status(500).json({ error: "Erro ao iniciar a voz do Barão." });
+    // detail distingue modelo inexistente de indisponibilidade do fornecedor
+    res.status(500).json({ error: "Erro ao iniciar a voz do Barão.", detail: String(error?.message || error) });
   }
 });
 
