@@ -2971,7 +2971,10 @@ app.get("/api/health", async (req, res) => {
     geminiKeyConfigured: !!process.env.GEMINI_API_KEY,
     deepseekKeyConfigured: !!process.env.DEEPSEEK_API_KEY,
     kieKeyConfigured: !!process.env.KIE_API_KEY,
-    // voz: azure é a principal; sem ela o Barão cai na reserva do Gemini
+    // voz: ElevenLabs é a principal; Azure e Gemini são as reservas
+    elevenLabsKeyConfigured: !!process.env.ELEVENLABS_API_KEY,
+    elevenLabsVoiceId: ELEVENLABS_VOICE_ID,
+    elevenLabsModel: ELEVENLABS_MODEL,
     azureSpeechConfigured: !!process.env.AZURE_SPEECH_KEY,
     azureSpeechRegion: AZURE_SPEECH_REGION,
     azureTtsVoice: AZURE_TTS_VOICE
