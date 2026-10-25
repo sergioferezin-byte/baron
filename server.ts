@@ -3483,6 +3483,38 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
+// Renova a sessão do app sem exigir a senha outra vez. O token de acesso do
+// Supabase dura cerca de uma hora; o app guarda o refresh_token e troca por um
+// par novo aqui quando alguma chamada autenticada responde 401.
+app.post("/api/auth/refresh", async (req, res) => {
+  try {
+    const { refresh_token } = req.body;
+    if (!refresh_token) {
+      return res.status(400).json({ error: "refresh_token é obrigatório." });
+    }
+
+    const authClient = createSupabaseAuthClient();
+    if (!authClient) {
+      return res.status(503).json({ error: "Autenticação não configurada no servidor." });
+    }
+
+    const { data, error } = await authClient.auth.refreshSession({ refresh_token });
+    if (error || !data?.session) {
+      return res.status(401).json({ error: "Sua sessão expirou. Entre novamente." });
+    }
+
+    res.json({
+      session: {
+        access_token: data.session.access_token,
+        refresh_token: data.session.refresh_token
+      }
+    });
+  } catch (error: any) {
+    console.error("[Auth Refresh] Failed:", error);
+    res.status(500).json({ error: "Falha ao renovar a sessão." });
+  }
+});
+
 app.post("/api/auth/google-sync", requireAuth, async (req: AuthRequest, res) => {
   try {
     const { email, name } = req.body;
@@ -3780,6 +3812,56 @@ app.post("/api/chats/:conversaId/messages", requireAuth, async (req: AuthRequest
   } catch (error) {
     console.error("[Save Message] Failed:", error);
     res.status(500).json({ error: "Erro ao salvar mensagem no banco." });
+  }
+});
+
+/**
+ * Envio em lote usado pela sincronização do app: a primeira sincronização pode
+ * ter dezenas de falas e ir uma a uma levaria minutos no celular. A ordem é
+ * preservada somando milissegundos ao horário de cada linha.
+ */
+app.post("/api/chats/:conversaId/messages/lote", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const conversaId = Number(req.params.conversaId);
+    if (!Number.isInteger(conversaId)) return res.status(400).json({ error: "conversaId inválido" });
+
+    const lista = Array.isArray(req.body?.mensagens) ? req.body.mensagens : [];
+    if (lista.length === 0) return res.json({ inseridas: 0 });
+
+    const [chat] = await db.select().from(conversas).where(eq(conversas.id, conversaId)).limit(1);
+    if (!chat) return res.status(404).json({ error: "Conversa não encontrada." });
+    if (req.user && !(await userUidMatches(chat.usuarioId, req.user.id))) {
+      return res.status(403).json({ error: "Acesso negado." });
+    }
+
+    const inicio = Date.now();
+    const linhas = lista
+      .filter((m: any) => m && typeof m.text === "string" && m.text.trim())
+      .slice(0, 500)
+      .map((m: any, indice: number) => {
+        const informado = m.timestamp ? new Date(m.timestamp) : null;
+        const base =
+          informado && !Number.isNaN(informado.getTime())
+            ? informado.getTime()
+            : inicio + indice;
+        return {
+          conversaId,
+          autor: m.role === "user" ? "usuario" : "barao",
+          conteudoTexto: String(m.text).slice(0, 8000),
+          audioGeradoUrl: m.audioUrl || null,
+          createdAt: new Date(base + indice)
+        };
+      });
+
+    if (linhas.length > 0) {
+      await db.insert(mensagens).values(linhas);
+      await db.update(conversas).set({ updatedAt: new Date() }).where(eq(conversas.id, conversaId));
+    }
+
+    res.json({ inseridas: linhas.length });
+  } catch (error) {
+    console.error("[Save Message Batch] Failed:", error);
+    res.status(500).json({ error: "Erro ao salvar as mensagens no banco." });
   }
 });
 
