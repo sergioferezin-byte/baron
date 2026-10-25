@@ -35,6 +35,16 @@ import baraoPortrait from "../assets/images/barao_portrait_1779931788412.png";
 import AmbientMixer from "./AmbientMixer";
 import { renderAvatarSvgOrImg } from "../utils/avatar";
 import { syncConversations, apiFetch } from "../utils/supabaseSync";
+import {
+  analisarVideo,
+  comprimirFoto,
+  duracaoCurta,
+  enviarFoto,
+  enviarVideo,
+  gerarFoto,
+  LIMITE_VIDEO,
+  type MidiaChat
+} from "../utils/midiaChat";
 
 const EMOJI_CATEGORIES = [
   {
@@ -57,6 +67,27 @@ interface BaraoChatProps {
   onTabChange?: (tab: string) => void;
   onUserUpdate?: (updatedUser: User) => void;
   baronAvatar?: string;
+}
+
+/** Arquivo escolhido, ainda no navegador, à espera do envio. */
+interface AnexoPendente {
+  id: string;
+  name: string;
+  type: "image" | "video" | "file";
+  /** Prévia local. Depois do upload, passa a ser a URL pública. */
+  url: string;
+  /** Foto comprimida pronta para subir. */
+  dataUrl?: string;
+  /** Capa do vídeo antes e depois do upload. */
+  posterPreview?: string;
+  posterUrl?: string;
+  /** Quadros do vídeo antes e depois do upload. */
+  frames?: string[];
+  frameUrls?: string[];
+  duration?: number;
+  width?: number;
+  height?: number;
+  file?: File;
 }
 
 export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUserUpdate, baronAvatar }: BaraoChatProps) {
@@ -85,12 +116,11 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
   const isGuestLimited = !currentUser && guestMsgCount >= 5;
 
   // New States and Refs for Attachments
-  const [pendingAttachments, setPendingAttachments] = useState<{
-    name: string;
-    type: 'image' | 'video' | 'file';
-    url: string;
-  }[]>([]);
+  const [pendingAttachments, setPendingAttachments] = useState<AnexoPendente[]>([]);
   const [showAttachmentMenu, setShowAttachmentMenu] = useState(false);
+  const [preparingMedia, setPreparingMedia] = useState(false);
+  const [sendingMedia, setSendingMedia] = useState(false);
+  const [mediaError, setMediaError] = useState<string | null>(null);
   const [showFuelDetails, setShowFuelDetails] = useState(false);
 
   // Dynamic Emotion Pulsation Speed based on chat messages
@@ -152,14 +182,19 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>, typeOverride?: 'image' | 'video' | 'file') => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>, typeOverride?: 'image' | 'video' | 'file') => {
+    const files: File[] = e.target.files ? Array.from(e.target.files) : [];
+    e.target.value = '';
+    if (files.length === 0) return;
 
-    const newAttachments: { name: string; type: 'image' | 'video' | 'file'; url: string }[] = [];
-    
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
+    setShowAttachmentMenu(false);
+    setMediaError(null);
+    setPreparingMedia(true);
+
+    const preparados: AnexoPendente[] = [];
+    const problemas: string[] = [];
+
+    for (const file of files) {
       let fileType: 'image' | 'video' | 'file' = 'file';
       if (typeOverride) {
         fileType = typeOverride;
@@ -169,18 +204,156 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
         fileType = 'video';
       }
 
-      const objectUrl = URL.createObjectURL(file);
-      newAttachments.push({
-        name: file.name,
-        type: fileType,
-        url: objectUrl
-      });
+      try {
+        if (fileType === 'image') {
+          const foto = await comprimirFoto(file);
+          preparados.push({
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            name: file.name,
+            type: 'image',
+            url: foto.dataUrl,
+            dataUrl: foto.dataUrl,
+            width: foto.largura,
+            height: foto.altura
+          });
+        } else if (fileType === 'video') {
+          if (file.size > LIMITE_VIDEO) {
+            problemas.push(`${file.name} passa de 25 MB.`);
+            continue;
+          }
+          const video = await analisarVideo(file);
+          preparados.push({
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            name: file.name,
+            type: 'video',
+            url: video.poster,
+            posterPreview: video.poster,
+            frames: video.quadros,
+            duration: video.duracao,
+            width: video.largura,
+            height: video.altura,
+            file
+          });
+        } else {
+          preparados.push({
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            name: file.name,
+            type: 'file',
+            url: URL.createObjectURL(file),
+            file
+          });
+        }
+      } catch (err) {
+        console.error("Falha ao preparar mídia:", err);
+        problemas.push(
+          fileType === 'video'
+            ? `Não consegui ler ${file.name}. Tente um vídeo MP4 mais curto.`
+            : `Não consegui abrir ${file.name}.`
+        );
+      }
     }
 
-    setPendingAttachments(prev => [...prev, ...newAttachments]);
-    e.target.value = '';
-    setShowAttachmentMenu(false);
+    if (preparados.length > 0) {
+      setPendingAttachments(prev => [...prev, ...preparados]);
+    }
+    if (problemas.length > 0) setMediaError(problemas.join(' '));
+    setPreparingMedia(false);
   };
+
+  /** Sobe a mídia e devolve o que o servidor precisa para o Barão ver. */
+  const subirAnexo = async (anexo: AnexoPendente): Promise<MidiaChat | null> => {
+    if (anexo.type === 'image' && anexo.dataUrl) {
+      const url = await enviarFoto(anexo.dataUrl, anexo.name);
+      return {
+        tipo: 'foto',
+        url,
+        nome: anexo.name,
+        largura: anexo.width,
+        altura: anexo.height
+      };
+    }
+
+    if (anexo.type === 'video' && anexo.file) {
+      // Os quadros sobem como fotos: é assim que a visão do Barão os lê.
+      const capa = anexo.posterPreview;
+      const quadros = anexo.frames || [];
+      const [posterUrl, ...frameUrls] = await Promise.all([
+        capa ? enviarFoto(capa, 'capa.jpg') : Promise.resolve(undefined),
+        ...quadros.map((quadro, indice) => enviarFoto(quadro, `quadro-${indice + 1}.jpg`))
+      ]);
+
+      const url = await enviarVideo(anexo.file);
+      return {
+        tipo: 'video',
+        url,
+        posterUrl,
+        frames: frameUrls,
+        duracao: anexo.duration,
+        nome: anexo.name,
+        largura: anexo.width,
+        altura: anexo.height
+      };
+    }
+
+    // Arquivos comuns continuam apenas no aparelho.
+    return null;
+  };
+
+  /**
+   * Pede a foto ao servidor e troca a bolha "revelando" pela imagem quando ela
+   * fica pronta. Fica fora do sync do banco: a imagem é uma lembrança local.
+   */
+  const revelarFoto = (descricao: string, conversa: Message[], dia: string) => {
+    const placeholder: Message = {
+      id: "m-revelando-" + Date.now(),
+      role: "model",
+      text: "",
+      timestamp: new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }),
+      date: dia,
+      generating: true
+    };
+
+    const guardar = (lista: Message[]) => {
+      setMessages(lista);
+      if (!isIncognito) localStorage.setItem(storageKey, JSON.stringify(lista));
+    };
+
+    guardar([...conversa, placeholder]);
+
+    gerarFoto(descricao)
+      .then((url) => {
+        setMessages(prev => {
+          const next = prev.map(m =>
+            m.id === placeholder.id
+              ? {
+                  ...m,
+                  generating: false,
+                  attachments: [{ name: "Uma lembrança do Barão", type: "image" as const, url }]
+                }
+              : m
+          );
+          if (!isIncognito) localStorage.setItem(storageKey, JSON.stringify(next));
+          return next;
+        });
+      })
+      .catch((err) => {
+        console.error("Falha ao revelar foto:", err);
+        setMessages(prev => {
+          const next = prev.map(m =>
+            m.id === placeholder.id
+              ? {
+                  ...m,
+                  generating: false,
+                  text: "Não consegui revelar esta imagem agora. Me peça de novo daqui a pouco?"
+                }
+              : m
+          );
+          if (!isIncognito) localStorage.setItem(storageKey, JSON.stringify(next));
+          return next;
+        });
+      });
+  };
+
 
   // Simple completion calculator for BaraoChat
   const getProfileStats = () => {
@@ -397,7 +570,16 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
     const saved = localStorage.getItem(storageKey);
     if (saved) {
       try {
-        setMessages(JSON.parse(saved));
+        const salvos: Message[] = JSON.parse(saved);
+        // Uma foto que estava sendo revelada quando a página fechou não tem
+        // como continuar; sem isso, a bolha vazia ficaria eterna.
+        setMessages(
+          Array.isArray(salvos)
+            ? salvos.filter(
+                (m) => !(m?.generating && !m?.text && !(m?.attachments && m.attachments.length))
+              )
+            : []
+        );
       } catch (e) {
         console.error("Stale history config");
       }
@@ -698,9 +880,17 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
   // Send message
   const handleSendMessage = async (customText?: string) => {
     const textToSend = (customText || inputVal).trim();
-    if ((!textToSend && pendingAttachments.length === 0) || isLoading) return;
+    if (
+      (!textToSend && pendingAttachments.length === 0) ||
+      isLoading ||
+      preparingMedia ||
+      sendingMedia
+    ) {
+      return;
+    }
 
     setTokenError(null);
+    setMediaError(null);
     setShowEmojiPicker(false);
 
     // Stop speaking currently active speech
@@ -739,16 +929,66 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
 
     const todayStr = new Date().toISOString().split("T")[0];
     const attachmentsToSend = [...pendingAttachments];
-    setPendingAttachments([]); // Clear pending list instantly
+    const anexosVisiveis: NonNullable<Message["attachments"]> = [];
+    const midiasParaOBarao: MidiaChat[] = [];
+
+    // Sobe a mídia antes de criar a bolha: a conversa guarda o endereço
+    // definitivo e o Barão recebe exatamente o que a pessoa vê.
+    if (attachmentsToSend.length > 0) {
+      setSendingMedia(true);
+      setMediaError(null);
+      try {
+        for (const anexo of attachmentsToSend) {
+          const midia = await subirAnexo(anexo);
+
+          if (!midia) {
+            anexosVisiveis.push({ name: anexo.name, type: "file", url: anexo.url });
+            continue;
+          }
+
+          midiasParaOBarao.push(midia);
+          anexosVisiveis.push({
+            name: anexo.name,
+            type: midia.tipo === "video" ? "video" : "image",
+            url: midia.url,
+            posterUrl: midia.posterUrl,
+            frames: midia.frames,
+            duration: midia.duracao,
+            width: midia.largura,
+            height: midia.altura
+          });
+        }
+      } catch (erro) {
+        console.error("[Chat Mídia] Envio falhou:", erro);
+        setSendingMedia(false);
+        setMediaError(
+          "Não consegui enviar esta mídia agora. Verifique a conexão e tente de novo."
+        );
+        return;
+      }
+      setSendingMedia(false);
+    }
+
+    setPendingAttachments([]);
+
+    const rotuloDosAnexos = () => {
+      const tipos = new Set(attachmentsToSend.map(a => a.type));
+      const temVideo = tipos.has("video");
+      const temFoto = tipos.has("image");
+      if (temVideo && temFoto) return "Fotos e um vídeo para você.";
+      if (temVideo) return attachmentsToSend.length > 1 ? "Vídeos para você." : "Um vídeo para você.";
+      if (temFoto) return attachmentsToSend.length > 1 ? "Fotos para você." : "Uma foto para você.";
+      return attachmentsToSend.length > 1 ? "Arquivos anexados" : "Arquivo anexado";
+    };
 
     const userMsg: Message = {
       id: "u-" + Date.now(),
       role: "user",
-      text: textToSend || (attachmentsToSend.length > 1 ? "Arquivos anexados" : "Arquivo anexado"),
+      text: textToSend || (attachmentsToSend.length > 0 ? rotuloDosAnexos() : ""),
       timestamp: new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }),
       isVoice: isRecording,
       date: todayStr,
-      ...(attachmentsToSend.length > 0 ? { attachments: attachmentsToSend } : {})
+      ...(anexosVisiveis.length > 0 ? { attachments: anexosVisiveis } : {})
     };
 
     const updated = [...messages, userMsg];
@@ -756,15 +996,13 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
     setInputVal("");
     setIsLoading(true);
 
-    let messagePayload = textToSend;
-    if (attachmentsToSend.length > 0) {
-      const fileNames = attachmentsToSend.map(f => `[${f.type.toUpperCase()}: ${f.name}]`).join(", ");
-      if (messagePayload) {
-        messagePayload += `\n\n(Nota técnica invisível para o assistente: O usuário anexou com sucesso estes itens à mensagem física: ${fileNames}. Por favor, comente ou faça observações acolhedoras sobre estes anexos, sintonizando com as necessidades do usuário de forma humana e poética.)`;
-      } else {
-        messagePayload = `Enviado anexo de mídia: ${fileNames}\n\n(Nota técnica invisível para o assistente: O usuário enviou apenas anexos físicos de mídia: ${fileNames}. Faça observações interessantes, artísticas ou acolhedoras e pergunte o que o usuário gostaria de sintonizar com relação a eles hoje.)`;
-      }
-    }
+    // Só os arquivos comuns precisam de aviso: foto e vídeo viajam em `media`.
+    // Quando não há legenda, o rótulo da bolha também é a fala enviada, para
+    // o servidor não recusar a mensagem vazia.
+    const arquivosComuns = attachmentsToSend.filter(a => a.type === "file").map(a => a.name);
+    const messagePayload = arquivosComuns.length
+      ? `${userMsg.text}${userMsg.text ? "\n\n" : ""}[A pessoa anexou um arquivo que você não consegue abrir: ${arquivosComuns.join(", ")}. Reconheça que ele existe e pergunte o que ela gostaria de compartilhar sobre ele.]`
+      : userMsg.text;
 
     try {
       // Map history to avoid sending too long chunks: take the last 8 messages
@@ -821,6 +1059,7 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
           thread_id: threadId,
           session_id: sessionId,
           conversation_id: conversationId,
+          ...(midiasParaOBarao.length > 0 ? { media: midiasParaOBarao } : {}),
         }),
       });
 
@@ -850,6 +1089,12 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
 
       const finalMessages = [...updated, modelMsg];
       saveHistory(finalMessages);
+
+      // Quando ele decide mostrar uma foto, a bolha "revelando" entra na hora
+      // e é trocada pela imagem assim que a geração termina.
+      if (data?.pedirFoto?.descricao) {
+        revelarFoto(data.pedirFoto.descricao, finalMessages, todayStr);
+      }
 
       if (isTTSAutoPlay && !data.isConfigError) {
         speakResponse(modelMsg.id, responseText);
@@ -1482,23 +1727,45 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
                           }`}
                         >
                           {/* Text formatting inside mobile text size and spacing */}
-                          <div className={`text-[15.5px] sm:text-[16.5px] leading-relaxed md:leading-[1.75] font-light ${
-                            isUser
-                              ? "font-sans text-zinc-100 block break-words"
-                              : "font-serif italic text-[#E5CD9D] whitespace-pre-line block break-words"
-                          }`}>
-                            {msg.text}
-                          </div>
+                          {(msg.generating || msg.text.trim()) && (
+                            <div className={`text-[15.5px] sm:text-[16.5px] leading-relaxed md:leading-[1.75] font-light ${
+                              isUser
+                                ? "font-sans text-zinc-100 block break-words"
+                                : "font-serif italic text-[#E5CD9D] whitespace-pre-line block break-words"
+                            }`}>
+                              {msg.generating ? (
+                                <span className="inline-flex items-center gap-2 text-[#E5CD9D]/85">
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  O Barão revela...
+                                </span>
+                              ) : (
+                                msg.text
+                              )}
+                            </div>
+                          )}
 
                           {msg.attachments && msg.attachments.length > 0 && (
-                            <div className="mt-2.5 flex flex-col gap-2 max-w-xs sm:max-w-md">
+                            <div className={`flex flex-col gap-2 max-w-[300px] sm:max-w-md ${msg.text.trim() || msg.generating ? "mt-2.5" : ""}`}>
                               {msg.attachments.map((attach, idx) => (
-                                <div key={idx} className="relative overflow-hidden rounded border border-[#C5A059]/25 bg-black/60 p-1">
+                                <div key={idx} className="relative overflow-hidden rounded border border-[#C5A059]/25 bg-black/60">
                                   {attach.type === 'image' && (
-                                    <img src={attach.url} alt={attach.name} className="w-full max-h-48 object-cover rounded-sm" referrerPolicy="no-referrer" />
+                                    <img
+                                      src={attach.url}
+                                      alt={attach.name}
+                                      loading="lazy"
+                                      className="block w-auto max-w-full max-h-72 object-contain"
+                                      referrerPolicy="no-referrer"
+                                    />
                                   )}
                                   {attach.type === 'video' && (
-                                    <video src={attach.url} controls className="w-full max-h-48 object-contain rounded-sm" />
+                                    <video
+                                      src={attach.url}
+                                      poster={attach.posterUrl}
+                                      controls
+                                      playsInline
+                                      preload="metadata"
+                                      className="block w-full max-w-[300px] max-h-72 bg-black"
+                                    />
                                   )}
                                   {attach.type === 'file' && (
                                     <div className="p-2 flex items-center gap-2 text-zinc-200 text-xs font-mono">
@@ -1529,7 +1796,7 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
                           )}
 
                           {/* Listening Button for O Barão's dialogue */}
-                          {!isUser && msg.id !== "welcome-reset" && !isErrorMsg && (
+                          {!isUser && msg.id !== "welcome-reset" && !isErrorMsg && !!msg.text.trim() && (
                             <button
                               onClick={() => speakResponse(msg.id, msg.text)}
                               className={`absolute -bottom-3 right-4 flex h-6.5 items-center gap-1.5 rounded-sm px-2.5 text-[8.5px] uppercase font-mono tracking-[0.12em] shadow-lg border transition-all duration-300 ${
@@ -1766,23 +2033,60 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
                     <div className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-2.5 w-full">
                       {/* Main Input text and Send button row - Always on top on mobile, on the right on desktop */}
                       <div className="flex flex-col w-full order-1 sm:order-2 sm:flex-1 relative gap-2">
-                        {pendingAttachments.length > 0 && (
-                          <div className="flex flex-wrap gap-2 p-1.5 bg-[#0a0a09]/85 border border-[#C5A059]/20 rounded-sm w-full animate-fade-in text-left">
+                        {(pendingAttachments.length > 0 || preparingMedia || sendingMedia || mediaError) && (
+                          <div className="flex flex-wrap items-center gap-2 p-1.5 bg-[#0a0a09]/85 border border-[#C5A059]/20 rounded-sm w-full animate-fade-in text-left">
                             {pendingAttachments.map((f, i) => (
-                              <div key={i} className="flex items-center gap-1.5 px-2.5 py-1 bg-[#121110] border border-white/5 rounded-sm text-xs text-white">
-                                {f.type === 'image' && <Image className="h-3.5 w-3.5 text-rose-400" />}
-                                {f.type === 'video' && <Video className="h-3.5 w-3.5 text-amber-400" />}
-                                {f.type === 'file' && <FileText className="h-3.5 w-3.5 text-[#C5A059]" />}
-                                <span className="max-w-[120px] truncate">{f.name}</span>
+                              <div
+                                key={f.id}
+                                className="relative h-16 w-16 shrink-0 overflow-hidden rounded-sm border border-white/10 bg-black"
+                              >
+                                <img
+                                  src={f.type === 'video' ? (f.posterPreview || f.posterUrl || f.url) : f.url}
+                                  alt=""
+                                  className="h-full w-full object-cover"
+                                  draggable={false}
+                                />
+                                {f.type === 'video' && (
+                                  <>
+                                    <span className="absolute inset-0 grid place-items-center bg-black/25 pointer-events-none">
+                                      <Video className="h-4 w-4 text-white/90" />
+                                    </span>
+                                    <span className="absolute bottom-0.5 right-0.5 rounded-sm bg-black/75 px-1 font-mono text-[8px] text-[#E5CD9D] pointer-events-none">
+                                      {duracaoCurta(f.duration || 0)}
+                                    </span>
+                                  </>
+                                )}
+                                {f.type === 'file' && (
+                                  <span className="absolute inset-0 grid place-items-center bg-black/40 pointer-events-none">
+                                    <FileText className="h-4 w-4 text-[#C5A059]" />
+                                  </span>
+                                )}
                                 <button
                                   type="button"
                                   onClick={() => setPendingAttachments(prev => prev.filter((_, idx) => idx !== i))}
-                                  className="text-zinc-550 hover:text-red-400 font-bold ml-1"
+                                  disabled={sendingMedia || preparingMedia}
+                                  className="absolute right-0.5 top-0.5 grid h-4 w-4 place-items-center rounded-full bg-black/75 text-[9px] leading-none text-zinc-300 hover:text-red-400 disabled:opacity-40"
+                                  aria-label={`Remover ${f.name}`}
                                 >
                                   ✕
                                 </button>
                               </div>
                             ))}
+
+                            <div className="min-w-0 flex-1 pl-1">
+                              <span className="block font-mono text-[8px] uppercase tracking-[0.12em] text-[#C5A059]/80">
+                                {preparingMedia
+                                  ? "Preparando mídia..."
+                                  : sendingMedia
+                                  ? "Enviando para O Barão..."
+                                  : "Vai junto com a sua próxima mensagem"}
+                              </span>
+                              {mediaError && (
+                                <p className="mt-1 font-serif text-[10px] italic leading-relaxed text-rose-300">
+                                  {mediaError}
+                                </p>
+                              )}
+                            </div>
                           </div>
                         )}
                         
@@ -1837,7 +2141,7 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
                               handleSendMessage();
                               setShowEmojiPicker(false);
                             }}
-                            disabled={(!inputVal.trim() && pendingAttachments.length === 0) || isLoading}
+                            disabled={(!inputVal.trim() && pendingAttachments.length === 0) || isLoading || preparingMedia || sendingMedia}
                             className="relative z-10 flex h-11 w-11 shrink-0 items-center justify-center rounded-sm bg-barao-rose text-black font-bold transition-all duration-205 hover:bg-barao-gold disabled:opacity-30 shadow-md"
                           >
                             <Send className="h-4.5 w-4.5" />

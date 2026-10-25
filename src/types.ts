@@ -15,7 +15,14 @@ export interface Message {
     name: string;
     type: 'image' | 'video' | 'file';
     url: string;
+    posterUrl?: string;
+    frames?: string[];
+    duration?: number;
+    width?: number;
+    height?: number;
   }[];
+  /** Bolha provisória enquanto O Barão revela uma foto. */
+  generating?: boolean;
 }
 
 export interface AmbientSound {
