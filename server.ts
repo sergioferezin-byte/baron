@@ -1237,11 +1237,48 @@ async function imagePartFromUrl(url: string): Promise<any | null> {
   }
 }
 
+// Modelos de visão em ordem de preferência. O nome do modelo de imagem muda
+// com o tempo; se o primeiro não existir, os seguintes assumem sem quebrar o
+// chat (antes, um nome inválido deixava o Barão cego em silêncio).
+const VISION_MODELS = Array.from(new Set([
+  process.env.VISION_MODEL,
+  "gemini-3-flash-preview",
+  "gemini-2.5-flash",
+  "gemini-2.0-flash"
+].filter((m): m is string => typeof m === "string" && m.trim().length > 0)));
+
+async function generateWithVisionFallback(
+  ai: any,
+  prompt: string,
+  parts: any[]
+): Promise<string | null> {
+  let lastError: any = null;
+  for (const model of VISION_MODELS) {
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: [{ role: "user", parts: [{ text: prompt }, ...parts] }],
+        config: { temperature: 0.35, maxOutputTokens: 600 }
+      });
+      const text = (response.text || "").trim();
+      if (text) {
+        console.log(`[Chat Media] Visão respondeu com ${model}.`);
+        return text;
+      }
+      lastError = new Error("resposta vazia");
+    } catch (error: any) {
+      lastError = error;
+      console.warn(`[Chat Media] Modelo ${model} falhou:`, error?.message || error);
+    }
+  }
+  console.error("[Chat Media] Nenhum modelo de visão respondeu:", lastError?.message || lastError);
+  return null;
+}
+
 async function describeChatMedia(media: any[]): Promise<string | null> {
   if (!process.env.GEMINI_API_KEY || !Array.isArray(media) || media.length === 0) {
     return null;
   }
-
   const parts: any[] = [];
   const notes: string[] = [];
 
@@ -1280,13 +1317,8 @@ Regras: 3 a 6 frases curtas. Diga o que aparece de concreto: pessoas (expressão
 
   try {
     const ai = getGeminiClient();
-    const response = await ai.models.generateContent({
-      model: VISION_MODEL,
-      contents: [{ role: "user", parts: [{ text: prompt }, ...parts] }],
-      config: { temperature: 0.35, maxOutputTokens: 600 }
-    });
-    const text = (response.text || "").trim();
-    return text || null;
+    const text = await generateWithVisionFallback(ai, prompt, parts);
+    return text;
   } catch (error) {
     console.error("[Chat Media] Gemini vision falhou:", error);
     return null;
@@ -1398,6 +1430,57 @@ app.post("/api/chat/media/sign", async (req, res) => {
     console.error("[Chat Media] Assinatura falhou:", error);
     res.status(500).json({ error: "Não consegui preparar o envio do vídeo." });
   }
+});
+
+// Diagnóstico da visão: mostra quais modelos respondem e se a imagem do
+// Storage pode ser lida. Serve para achar o motivo quando o Barão "não vê".
+app.post("/api/chat/media/diag", async (req, res) => {
+  const url = typeof req.body?.url === "string" ? req.body.url : null;
+  const host = supabaseMediaHost();
+  const result: any = {
+    geminiKeyConfigured: !!process.env.GEMINI_API_KEY,
+    visionModels: VISION_MODELS,
+    supabaseHost: host,
+    urlAllowed: url ? isSupabaseMediaUrl(url) : null,
+    urlRead: null,
+    models: {}
+  };
+
+  if (url) {
+    try {
+      const r = await fetch(url);
+      const buffer = Buffer.from(await r.arrayBuffer());
+      result.urlRead = {
+        status: r.status,
+        contentType: r.headers.get("content-type"),
+        bytes: buffer.length
+      };
+    } catch (error: any) {
+      result.urlRead = { error: error?.message || String(error) };
+    }
+  }
+
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      const ai = getGeminiClient();
+      for (const model of VISION_MODELS) {
+        try {
+          const r = await ai.models.generateContent({
+            model,
+            contents: [{ role: "user", parts: [{ text: "Responda apenas: ok" }] }],
+            config: { maxOutputTokens: 10 }
+          });
+          result.models[model] = { ok: true, text: (r.text || "").trim() };
+        } catch (error: any) {
+          result.models[model] = { ok: false, error: error?.message || String(error) };
+        }
+      }
+    } catch (error: any) {
+      result.modelsError = error?.message || String(error);
+    }
+  }
+
+  res.json(result);
 });
 
 // API endpoint for Chat
