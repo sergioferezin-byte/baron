@@ -1251,40 +1251,60 @@ async function generateWithVisionFallback(
   prompt: string,
   parts: any[]
 ): Promise<string | null> {
+  const pedir = async (
+    model: string,
+    config: Record<string, unknown>,
+    limiteMs: number
+  ): Promise<string> => {
+    const controlador = new AbortController();
+    const relogio = setTimeout(() => controlador.abort(), limiteMs);
+    try {
+      const resposta = await ai.models.generateContent({
+        model,
+        contents: [{ role: "user", parts: [{ text: prompt }, ...parts] }],
+        config: { ...config, abortSignal: controlador.signal }
+      });
+      return (resposta.text || "").trim();
+    } finally {
+      clearTimeout(relogio);
+    }
+  };
+
   let lastError: any = null;
   for (const model of VISION_MODELS) {
+    // Sem "pensamento": é o caminho rápido e o que devolve descrição pronta.
     try {
-      const response = await ai.models.generateContent({
+      const texto = await pedir(
         model,
-        contents: [{ role: "user", parts: [{ text: prompt }, ...parts] }],
-        config: { temperature: 0.35, maxOutputTokens: 700 }
-      });
-      const text = (response.text || "").trim();
-      if (text) {
+        { temperature: 0.35, maxOutputTokens: 600, thinkingConfig: { thinkingBudget: 0 } },
+        11000
+      );
+      if (texto) {
         console.log(`[Chat Media] Visão respondeu com ${model}.`);
-        return text;
+        return texto;
       }
-
-      // Modelos mais novos "pensam" antes de responder e podem gastar todo o
-      // limite de saída no raciocínio. Nesse caso, desligamos o pensamento.
-      const semPensar = await ai.models.generateContent({
-        model,
-        contents: [{ role: "user", parts: [{ text: prompt }, ...parts] }],
-        config: {
-          temperature: 0.35,
-          maxOutputTokens: 1200,
-          thinkingConfig: { thinkingBudget: 0 }
-        }
-      });
-      const textoSemPensar = (semPensar.text || "").trim();
-      if (textoSemPensar) {
-        console.log(`[Chat Media] Visão respondeu com ${model} (sem pensamento).`);
-        return textoSemPensar;
-      }
-      lastError = new Error("resposta vazia");
     } catch (error: any) {
       lastError = error;
-      console.warn(`[Chat Media] Modelo ${model} falhou:`, error?.message || error);
+      const motivo = String(error?.message || error);
+      console.warn(`[Chat Media] Modelo ${model} falhou:`, motivo.slice(0, 160));
+      // Só vale insistir sem a opção de pensamento quando ela foi recusada.
+      if (!/thinking|thinkingBudget|invalid|unknown field|400/i.test(motivo)) {
+        continue;
+      }
+    }
+
+    try {
+      const texto = await pedir(model, { temperature: 0.35, maxOutputTokens: 700 }, 13000);
+      if (texto) {
+        console.log(`[Chat Media] Visão respondeu com ${model} (sem ajuste de pensamento).`);
+        return texto;
+      }
+    } catch (error: any) {
+      lastError = error;
+      console.warn(
+        `[Chat Media] Modelo ${model} falhou de novo:`,
+        String(error?.message || error).slice(0, 160)
+      );
     }
   }
   console.error("[Chat Media] Nenhum modelo de visão respondeu:", lastError?.message || lastError);
