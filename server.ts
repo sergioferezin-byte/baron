@@ -3515,6 +3515,38 @@ app.post("/api/auth/refresh", async (req, res) => {
   }
 });
 
+// Apaga a conta e tudo o que está ligado a ela: conversas, mensagens, perfil e
+// carteira (em cascata) e o usuário na autenticação. O app oferece isso nos
+// Ajustes, como pede a política das lojas para apps com conta.
+app.delete("/api/auth/conta", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const uid = req.user?.id;
+    if (!uid) {
+      return res.status(401).json({ error: "Entre na conta para apagar." });
+    }
+
+    const [conta] = await db.select().from(usuarios).where(eq(usuarios.uid, uid)).limit(1);
+    if (conta) {
+      // conversas, mensagens, perfil, carteira e demais tabelas caem junto
+      await db.delete(usuarios).where(eq(usuarios.id, conta.id));
+    }
+
+    if (supabaseAdmin) {
+      const { error } = await supabaseAdmin.auth.admin.deleteUser(uid);
+      if (error) {
+        // As linhas já foram apagadas; sem o usuário no Auth ele não consegue
+        // entrar de novo, e o login recriaria uma conta vazia se entrasse.
+        console.error("[Auth Delete] Falha ao remover do Supabase Auth:", error.message);
+      }
+    }
+
+    res.json({ apagada: true });
+  } catch (error) {
+    console.error("[Auth Delete] Failed:", error);
+    res.status(500).json({ error: "Não consegui apagar a conta agora. Tente de novo." });
+  }
+});
+
 app.post("/api/auth/google-sync", requireAuth, async (req: AuthRequest, res) => {
   try {
     const { email, name } = req.body;
