@@ -645,6 +645,11 @@ function escapeXml(text: string): string {
 const GEMINI_TTS_MODEL = process.env.GEMINI_TTS_MODEL || "gemini-2.5-flash-preview-tts";
 const GEMINI_TTS_VOICE = process.env.GEMINI_TTS_VOICE || "Charon"; // masculina, grave
 
+// Modelo que "olha" as fotos e os quadros de vídeo enviados no chat. O
+// Flash-Lite é rápido e barato; se não aceitar imagem no futuro, troque por
+// gemini-2.5-flash sem mexer no resto do código.
+const VISION_MODEL = process.env.VISION_MODEL || "gemini-3.1-flash-lite";
+
 // O Gemini devolve PCM cru; o navegador precisa do cabeçalho WAV
 function pcmToWav(pcm: Buffer, sampleRate = 24000, channels = 1, bitsPerSample = 16): Buffer {
   const blockAlign = (channels * bitsPerSample) / 8;
@@ -1182,6 +1187,219 @@ function formatUserProfile(profile: any): string {
   return info.join("\n\n");
 }
 
+// ===== Mídia no chat (fotos e vídeos enviados pela pessoa) =====
+// Fotos sobem comprimidas em base64; vídeos sobem direto para o Supabase com
+// URL assinada, porque o limite de corpo da Vercel não comporta um vídeo.
+// O Barão "vê" até 4 imagens por vez (a foto, ou o pôster + quadros do vídeo)
+// através do Gemini, e recebe uma descrição objetiva para comentar.
+const VISION_MAX_IMAGES = 4;
+const VISION_MAX_BYTES = 6 * 1024 * 1024;
+
+function supabaseMediaHost(): string | null {
+  const url = process.env.VITE_SUPABASE_URL;
+  if (!url) return "tzybwgiviuotvbknugsc.supabase.co";
+  try {
+    return new URL(url).host;
+  } catch {
+    return null;
+  }
+}
+
+// Só aceitamos imagens que estejam no nosso próprio Storage: evita que o
+// endpoint público seja usado para buscar URLs arbitrárias (SSRF).
+function isSupabaseMediaUrl(value: unknown): value is string {
+  if (typeof value !== "string" || !/^https:\/\//i.test(value)) return false;
+  const host = supabaseMediaHost();
+  if (!host) return false;
+  try {
+    return new URL(value).host === host;
+  } catch {
+    return false;
+  }
+}
+
+async function imagePartFromUrl(url: string): Promise<any | null> {
+  if (!isSupabaseMediaUrl(url)) return null;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const mime = (res.headers.get("content-type") || "image/jpeg")
+      .split(";")[0]
+      .trim()
+      .toLowerCase();
+    if (!/^image\/(jpeg|png|webp|gif)$/.test(mime)) return null;
+    const buffer = Buffer.from(await res.arrayBuffer());
+    if (buffer.length === 0 || buffer.length > VISION_MAX_BYTES) return null;
+    return { inlineData: { mimeType: mime, data: buffer.toString("base64") } };
+  } catch (error) {
+    console.warn("[Chat Media] Falha ao ler imagem:", url, error);
+    return null;
+  }
+}
+
+async function describeChatMedia(media: any[]): Promise<string | null> {
+  if (!process.env.GEMINI_API_KEY || !Array.isArray(media) || media.length === 0) {
+    return null;
+  }
+
+  const parts: any[] = [];
+  const notes: string[] = [];
+
+  for (const item of media.slice(0, 3)) {
+    if (!item || typeof item !== "object") continue;
+
+    if (item.tipo === "video") {
+      const duracao = Math.max(0, Math.round(Number(item.duracao) || 0));
+      notes.push(
+        `Um vídeo de ${duracao || "poucos"} segundos. As imagens a seguir são quadros extraídos desse vídeo, na ordem em que aparecem.`
+      );
+      const urls = [item.posterUrl, ...(Array.isArray(item.frames) ? item.frames : [])]
+        .filter(isSupabaseMediaUrl)
+        .slice(0, 3);
+      for (const url of urls) {
+        const part = await imagePartFromUrl(url);
+        if (part) parts.push(part);
+        if (parts.length >= VISION_MAX_IMAGES) break;
+      }
+    } else {
+      const part = await imagePartFromUrl(item.url);
+      if (part) {
+        parts.push(part);
+        notes.push("Uma foto enviada pela pessoa.");
+      }
+    }
+
+    if (parts.length >= VISION_MAX_IMAGES) break;
+  }
+
+  if (parts.length === 0) return null;
+
+  const prompt = `Você é os olhos d'O Barão, um companheiro emocional brasileiro. Olhe as imagens e descreva para ele, em português, apenas o que é visível. ${notes.join(" ")}
+
+Regras: 3 a 6 frases curtas. Diga o que aparece de concreto: pessoas (expressão, roupa, pose, o que fazem), lugar, objetos, animais, comida, texto legível, luz e clima da cena. Se forem quadros de um vídeo, conte o que acontece e o que muda de um quadro para o outro. Não invente, não adivinhe sentimentos íntimos e não se dirija à pessoa. Fale em terceira pessoa, como uma descrição objetiva e sensorial para o Barão usar na conversa.`;
+
+  try {
+    const ai = getGeminiClient();
+    const response = await ai.models.generateContent({
+      model: VISION_MODEL,
+      contents: [{ role: "user", parts: [{ text: prompt }, ...parts] }],
+      config: { temperature: 0.35, maxOutputTokens: 600 }
+    });
+    const text = (response.text || "").trim();
+    return text || null;
+  } catch (error) {
+    console.error("[Chat Media] Gemini vision falhou:", error);
+    return null;
+  }
+}
+
+// Detecta pedidos de foto/imagem para o Barão revelar uma imagem depois da
+// resposta. Só vale quando não há mídia anexada (aí a pessoa está comentando
+// uma foto que já mandou).
+function detectPhotoRequest(message: string): { descricao: string; retrato: boolean } | null {
+  const text = String(message || "").trim();
+  if (!text) return null;
+  const lower = text.toLowerCase();
+  if (/\b(n[ãa]o|sem)\s+(quero|preciso|manda|envia|mostra|me\s+manda|me\s+envia)\b/.test(lower)) {
+    return null;
+  }
+
+  const visual = /\b(foto|fotografia|imagem|retrato|selfie|desenho|pintura|ilustra[çc][ãa]o|avatar)\b/.test(lower);
+  const action = /\b(manda|envia|mostra|quero|gostaria|pode|consegue|faz|fa[çc]a|desenha|pinta|ilustra|cria|gera|tira|me\s+d[êe])\b/.test(lower);
+  const verVoce = /\bquero\s+ver\s+voc[êe]\b/.test(lower);
+  if ((!visual && !verVoce) || (!action && !verVoce)) return null;
+
+  const retrato = /\b(voc[êe]|seu|sua|selfie|retrato)\b/.test(lower);
+  return {
+    descricao: (retrato && !/bar[ãa]o/i.test(text) ? `Retrato do Barão — ${text}` : text).slice(0, 400),
+    retrato
+  };
+}
+
+// Recebe uma foto já comprimida pelo app, guarda no Storage e devolve a URL.
+app.post("/api/chat/media", async (req, res) => {
+  try {
+    const { dataUrl, nome } = req.body;
+    if (typeof dataUrl !== "string" || !/^data:image\/(jpeg|png|webp);base64,/i.test(dataUrl)) {
+      return res.status(400).json({ error: "Envie uma foto em JPEG, PNG ou WebP." });
+    }
+
+    const base64 = dataUrl.split(",")[1] || "";
+    const bytes = Math.floor((base64.length * 3) / 4);
+    if (bytes > 4.5 * 1024 * 1024) {
+      return res.status(413).json({ error: "A foto ficou grande demais. Tente outra." });
+    }
+    if (!supabaseAdmin) {
+      return res.status(503).json({ error: "Armazenamento de mídia indisponível." });
+    }
+
+    const url = await uploadDataUrlToStorage(dataUrl, "chat");
+    if (!url) return res.status(500).json({ error: "Não consegui guardar a foto." });
+
+    res.json({
+      url,
+      nome: typeof nome === "string" ? nome.slice(0, 120) : undefined
+    });
+  } catch (error: any) {
+    console.error("[Chat Media] Upload falhou:", error);
+    res.status(500).json({ error: "Não consegui guardar a foto." });
+  }
+});
+
+// Cria uma URL assinada para o app subir o vídeo direto no Supabase Storage.
+app.post("/api/chat/media/sign", async (req, res) => {
+  try {
+    const { contentType, tamanho } = req.body;
+    const type = typeof contentType === "string" ? contentType.toLowerCase() : "";
+    if (!/^video\/(mp4|webm|quicktime|3gpp|x-matroska)$/.test(type)) {
+      return res.status(400).json({ error: "Formato de vídeo não aceito." });
+    }
+
+    const size = Number(tamanho) || 0;
+    if (size <= 0 || size > 25 * 1024 * 1024) {
+      return res.status(413).json({ error: "O vídeo precisa ter até 25 MB." });
+    }
+    if (!supabaseAdmin) {
+      return res.status(503).json({ error: "Armazenamento de mídia indisponível." });
+    }
+
+    if (!readyBuckets.has(IMAGE_BUCKET)) {
+      await supabaseAdmin.storage.createBucket(IMAGE_BUCKET, { public: true }).catch(() => {});
+      readyBuckets.add(IMAGE_BUCKET);
+    }
+
+    const ext = type.includes("quicktime")
+      ? "mov"
+      : type.includes("webm")
+        ? "webm"
+        : type.includes("3gpp")
+          ? "3gp"
+          : type.includes("matroska")
+            ? "mkv"
+            : "mp4";
+    const filePath = `chat/videos/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
+
+    const { data, error } = await supabaseAdmin.storage
+      .from(IMAGE_BUCKET)
+      .createSignedUploadUrl(filePath);
+    if (error || !data?.signedUrl) {
+      console.error("[Chat Media] URL assinada falhou:", error);
+      return res.status(500).json({ error: "Não consegui preparar o envio do vídeo." });
+    }
+
+    const { data: pub } = supabaseAdmin.storage.from(IMAGE_BUCKET).getPublicUrl(filePath);
+    res.json({
+      uploadUrl: data.signedUrl,
+      token: data.token,
+      path: filePath,
+      publicUrl: pub?.publicUrl || null
+    });
+  } catch (error: any) {
+    console.error("[Chat Media] Assinatura falhou:", error);
+    res.status(500).json({ error: "Não consegui preparar o envio do vídeo." });
+  }
+});
+
 // API endpoint for Chat
 app.post("/api/chat", async (req, res) => {
   try {
@@ -1192,6 +1410,7 @@ app.post("/api/chat", async (req, res) => {
       diaryContext, 
       userProfile, 
       profileWeight,
+      media,
       thread_id,
       session_id,
       conversation_id 
@@ -1199,7 +1418,7 @@ app.post("/api/chat", async (req, res) => {
 
     console.log(`[Chat Audit LOG] Processing query. thread_id: "${thread_id || 'none'}", session_id: "${session_id || 'none'}", conversation_id: "${conversation_id || 'none'}"`);
 
-    if (!message) {
+    if (typeof message !== "string" || !message.trim()) {
       return res.status(400).json({ error: "Message is required" });
     }
 
@@ -1269,6 +1488,34 @@ ${formatted}`;
       }
     }
 
+    // Mídias enviadas nesta mensagem: o Gemini descreve o que aparece e a
+    // descrição entra no turno atual, para o Barão comentar de verdade.
+    const mediaList = Array.isArray(media)
+      ? media.filter((item: any) => item && typeof item === "object").slice(0, 3)
+      : [];
+    const photoRequest = mediaList.length === 0 ? detectPhotoRequest(message) : null;
+    let mediaResumo: string | null = null;
+    let messageForModel = message;
+
+    if (mediaList.length > 0) {
+      mediaResumo = await describeChatMedia(mediaList);
+      const temVideo = mediaList.some((item: any) => item.tipo === "video");
+      if (mediaResumo) {
+        messageForModel = `${message}
+
+[O Barão acabou de olhar ${temVideo ? "o vídeo" : "a foto"} que a pessoa enviou. Descrição do que aparece: ${mediaResumo}]
+
+Responda como quem realmente olhou: comente algo específico e sensorial do que viu, de forma natural, sem dizer "a imagem mostra" de forma mecânica, sem mencionar esta nota e sem inventar detalhes que não estejam na descrição.${temVideo ? " Se fizer sentido, comente também o movimento ou a sequência do vídeo." : ""}`;
+      } else {
+        messageForModel = `${message}
+
+[A pessoa enviou ${mediaList.length > 1 ? "mídias" : "uma mídia"}, mas a imagem não pôde ser aberta agora. Reconheça com ternura que você não conseguiu ver direito e peça para ela contar o que aparece ou tentar enviar de novo.]`;
+      }
+    }
+
+    if (photoRequest) {
+      dynamicSystemInstruction += `\n\n[PEDIDO DE IMAGEM] A pessoa pediu uma foto/imagem. Responda em no máximo 2 frases, como quem está preparando uma revelação (por exemplo: "Deixe-me revelar isso para você..."), sem descrever a imagem ainda e sem prometer algo que não pode cumprir. A imagem será gerada e entregue logo depois desta resposta.`;
+    }
 
     // Map frontend history to Gemini content structure with robust filtering
     // 1. Combine history and current message into a raw list
@@ -1294,10 +1541,10 @@ ${formatted}`;
       }
     }
     
-    // Append current user message
+    // Append current user message (com a descrição da mídia, quando houver)
     rawDialog.push({
       role: "user",
-      text: message,
+      text: messageForModel,
     });
 
     // 2. Build alternating contents array starting with 'user'
@@ -1321,7 +1568,7 @@ ${formatted}`;
     if (contents.length === 0) {
       contents.push({
         role: "user",
-        parts: [{ text: message }],
+        parts: [{ text: messageForModel }],
       });
     } else {
       // Ensure the very last element of contents is our active current user message
@@ -1329,11 +1576,11 @@ ${formatted}`;
       if (lastItem.role !== "user") {
         contents.push({
           role: "user",
-          parts: [{ text: message }],
+          parts: [{ text: messageForModel }],
         });
       } else {
         // If the last item is user, make sure it is indeed our current active message
-        lastItem.parts = [{ text: message }];
+        lastItem.parts = [{ text: messageForModel }];
       }
     }
 
@@ -1351,7 +1598,11 @@ ${formatted}`;
       (await callDeepSeek(deepSeekMessages, { temperature: 0.9, topP: 0.95 })) ||
       "Estou aqui ouvindo o seu silêncio, de coração aberto. Fale mais comigo sobre o que te toca...";
 
-    res.json({ text: replyText });
+    res.json({
+      text: replyText,
+      ...(photoRequest ? { pedirFoto: photoRequest } : {}),
+      ...(mediaResumo ? { mediaResumo } : {})
+    });
   } catch (error: any) {
     console.error("[Chat API Error] Catching DeepSeek error:", error);
     
