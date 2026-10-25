@@ -648,7 +648,7 @@ const GEMINI_TTS_VOICE = process.env.GEMINI_TTS_VOICE || "Charon"; // masculina,
 // Modelo que "olha" as fotos e os quadros de vídeo enviados no chat. O
 // Flash-Lite é rápido e barato; se não aceitar imagem no futuro, troque por
 // gemini-2.5-flash sem mexer no resto do código.
-const VISION_MODEL = process.env.VISION_MODEL || "gemini-3.8-flash";
+const VISION_MODEL = process.env.VISION_MODEL || "gemini-3-flash-preview";
 
 // O Gemini devolve PCM cru; o navegador precisa do cabeçalho WAV
 function pcmToWav(pcm: Buffer, sampleRate = 24000, channels = 1, bitsPerSample = 16): Buffer {
@@ -1242,8 +1242,8 @@ async function imagePartFromUrl(url: string): Promise<any | null> {
 // chat (antes, um nome inválido deixava o Barão cego em silêncio).
 const VISION_MODELS = Array.from(new Set([
   process.env.VISION_MODEL,
-  "gemini-3.8-flash",
-  "gemini-3-flash-preview"
+  "gemini-3-flash-preview",
+  "gemini-3.8-flash"
 ].filter((m): m is string => typeof m === "string" && m.trim().length > 0)));
 
 async function generateWithVisionFallback(
@@ -1253,30 +1253,38 @@ async function generateWithVisionFallback(
 ): Promise<string | null> {
   let lastError: any = null;
   for (const model of VISION_MODELS) {
-    // Modelos mais novos "pensam" antes de responder e podem gastar todo o
-    // limite de saída no raciocínio, devolvendo texto vazio. Desligamos o
-    // pensamento quando possível e insistimos sem essa opção se ela for recusada.
-    const configs = [
-      { temperature: 0.35, maxOutputTokens: 900, thinkingConfig: { thinkingBudget: 0 } },
-      { temperature: 0.35, maxOutputTokens: 900 }
-    ];
-    for (const config of configs) {
-      try {
-        const response = await ai.models.generateContent({
-          model,
-          contents: [{ role: "user", parts: [{ text: prompt }, ...parts] }],
-          config
-        });
-        const text = (response.text || "").trim();
-        if (text) {
-          console.log(`[Chat Media] Visão respondeu com ${model}.`);
-          return text;
-        }
-        lastError = new Error("resposta vazia");
-      } catch (error: any) {
-        lastError = error;
-        console.warn(`[Chat Media] Modelo ${model} falhou:`, error?.message || error);
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: [{ role: "user", parts: [{ text: prompt }, ...parts] }],
+        config: { temperature: 0.35, maxOutputTokens: 700 }
+      });
+      const text = (response.text || "").trim();
+      if (text) {
+        console.log(`[Chat Media] Visão respondeu com ${model}.`);
+        return text;
       }
+
+      // Modelos mais novos "pensam" antes de responder e podem gastar todo o
+      // limite de saída no raciocínio. Nesse caso, desligamos o pensamento.
+      const semPensar = await ai.models.generateContent({
+        model,
+        contents: [{ role: "user", parts: [{ text: prompt }, ...parts] }],
+        config: {
+          temperature: 0.35,
+          maxOutputTokens: 1200,
+          thinkingConfig: { thinkingBudget: 0 }
+        }
+      });
+      const textoSemPensar = (semPensar.text || "").trim();
+      if (textoSemPensar) {
+        console.log(`[Chat Media] Visão respondeu com ${model} (sem pensamento).`);
+        return textoSemPensar;
+      }
+      lastError = new Error("resposta vazia");
+    } catch (error: any) {
+      lastError = error;
+      console.warn(`[Chat Media] Modelo ${model} falhou:`, error?.message || error);
     }
   }
   console.error("[Chat Media] Nenhum modelo de visão respondeu:", lastError?.message || lastError);
@@ -1466,6 +1474,12 @@ app.post("/api/chat/media/diag", async (req, res) => {
     } catch (error: any) {
       result.urlRead = { error: error?.message || String(error) };
     }
+  }
+
+  if (url && req.body?.descrever) {
+    const inicio = Date.now();
+    const resumo = await describeChatMedia([{ tipo: "foto", url }]);
+    result.descricao = { ms: Date.now() - inicio, resumo };
   }
 
   if (process.env.GEMINI_API_KEY) {
