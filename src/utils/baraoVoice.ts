@@ -6,14 +6,14 @@
  * voz do navegador (speechSynthesis) como último recurso.
  *
  * A ordem é:
- *   1. Azure AI Speech — voz masculina brasileira, síncrona (menos de 1s)
- *   2. Gemini TTS — reserva; mesma função, entonação menos estável
- *   3. (quem chama) voz do navegador
+ *   1. ElevenLabs — voz escolhida pela Nice, síncrona (poucos segundos)
+ *   2. Azure AI Speech — reserva rápida, voz masculina brasileira
+ *   3. Gemini TTS — última reserva do servidor
+ *   4. (quem chama) voz do navegador
  *
- * O kie.ai/ElevenLabs saiu dessa cadeia: sua ponte de TTS está fora do ar
- * desde jul/2026 e cada tentativa custava até 24s de espera antes de
- * falhar. Os endpoints /api/voice/speak e /status seguem no servidor para
- * retestar o fornecedor — se ele voltar, basta voltar a chamá-los aqui.
+ * A ponte antiga do kie.ai/ElevenLabs está fora do ar desde jul/2026; por
+ * isso falamos direto com a API da ElevenLabs. Os endpoints /api/voice/speak
+ * e /status seguem no servidor apenas para retestar o fornecedor.
  */
 async function requestVoiceUrl(endpoint: string, text: string): Promise<string | null> {
   try {
@@ -32,6 +32,9 @@ async function requestVoiceUrl(endpoint: string, text: string): Promise<string |
 }
 
 export async function requestBaraoVoiceUrl(text: string): Promise<string | null> {
+  const eleven = await requestVoiceUrl("/api/voice/elevenlabs", text);
+  if (eleven) return eleven;
+
   const azure = await requestVoiceUrl("/api/voice/azure", text);
   if (azure) return azure;
 

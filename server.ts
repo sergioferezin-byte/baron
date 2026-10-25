@@ -607,6 +607,17 @@ async function persistSunoAudio(sunoUrl: string): Promise<string> {
   return persistKieMedia(sunoUrl, MUSIC_BUCKET, "songs", "audio/mpeg", "mp3");
 }
 
+// ===== Voz principal do Barão (ElevenLabs) =====
+// Falamos direto com a API da ElevenLabs; a ponte antiga do kie.ai está
+// fora do ar. O Azure segue como reserva se a chave ou a voz falharem.
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+const ELEVENLABS_VOICE_ID =
+  process.env.ELEVENLABS_VOICE_ID || "PxO5uAS3Vy1IJcooXHmk";
+const ELEVENLABS_MODEL =
+  process.env.ELEVENLABS_MODEL || "eleven_multilingual_v2";
+const ELEVENLABS_OUTPUT_FORMAT =
+  process.env.ELEVENLABS_OUTPUT_FORMAT || "mp3_44100_128";
+
 // ===== Voz principal do Barão (Azure AI Speech) =====
 // Voz masculina brasileira de verdade, síncrona (um pedido devolve o MP3)
 // e com camada gratuita permanente de 500 mil caracteres/mês. Substituiu o
@@ -1926,6 +1937,100 @@ app.get("/api/voice/status/:taskId", async (req, res) => {
   } catch (error: any) {
     console.error("[Voice Status] Failed:", error);
     res.status(500).json({ error: "Erro ao consultar a voz do Barão." });
+  }
+});
+
+// Voz principal (ElevenLabs): síncrona — um pedido devolve o MP3 direto.
+// A voz padrão é a escolhida pela Nice; trocar por ELEVENLABS_VOICE_ID
+// não exige novo deploy. Se a chave não estiver configurada, o cliente
+// segue para o Azure sem tratar como erro.
+app.post("/api/voice/elevenlabs", async (req, res) => {
+  try {
+    const { text, voice: voiceOverride } = req.body;
+    if (!text || typeof text !== "string" || !text.trim()) {
+      return res.status(400).json({ error: "text é obrigatório" });
+    }
+
+    if (!ELEVENLABS_API_KEY) {
+      return res.status(200).json({
+        isConfigError: true,
+        error: "ELEVENLABS_API_KEY não configurada."
+      });
+    }
+
+    // Remove marcações de markdown; o limite da ElevenLabs é generoso
+    const cleanText = text
+      .replace(/\*\*/g, "")
+      .replace(/\*/g, "")
+      .replace(/#/g, "")
+      .trim()
+      .slice(0, 4900);
+
+    // voiceOverride permite testar outra voz sem novo deploy; só aceitamos
+    // IDs alfanuméricos para não montar uma URL arbitrária.
+    const requested = typeof voiceOverride === "string" ? voiceOverride.trim() : "";
+    const voice = /^[A-Za-z0-9]{10,40}$/.test(requested)
+      ? requested
+      : ELEVENLABS_VOICE_ID;
+
+    const response = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voice)}?output_format=${encodeURIComponent(ELEVENLABS_OUTPUT_FORMAT)}`,
+      {
+        method: "POST",
+        headers: {
+          "xi-api-key": ELEVENLABS_API_KEY,
+          "Content-Type": "application/json",
+          Accept: "audio/mpeg"
+        },
+        body: JSON.stringify({
+          text: cleanText,
+          model_id: ELEVENLABS_MODEL,
+          voice_settings: {
+            stability: 0.5,
+            similarity_boost: 0.75,
+            style: 0,
+            use_speaker_boost: true
+          }
+        })
+      }
+    );
+
+    if (!response.ok) {
+      // 401/403 = chave inválida; 429 = cota; 404/422 = voz/modelo inválidos.
+      // Em todos os casos o cliente deve cair para o Azure.
+      const detail = await response.text().catch(() => "");
+      console.error("[Voice ElevenLabs] HTTP", response.status, detail.slice(0, 300));
+      return res
+        .status(response.status === 401 || response.status === 403 ? 200 : 502)
+        .json({
+          ...(response.status === 401 || response.status === 403
+            ? { isConfigError: true }
+            : {}),
+          error: "Voz ElevenLabs indisponível.",
+          status: response.status,
+          detail: detail.slice(0, 300)
+        });
+    }
+
+    const mp3 = Buffer.from(await response.arrayBuffer());
+    const audioUrl = await uploadBufferToStorage(
+      mp3,
+      VOICE_BUCKET,
+      "elevenlabs",
+      "audio/mpeg",
+      "mp3"
+    );
+    if (!audioUrl) {
+      return res.status(500).json({ error: "Falha ao guardar a voz do Barão." });
+    }
+
+    res.json({ audioUrl, voice, model: ELEVENLABS_MODEL });
+  } catch (error: any) {
+    console.error("[Voice ElevenLabs] Failed:", error);
+    res.status(500).json({
+      error: "Erro ao gerar a voz do Barão.",
+      detail: String(error?.message || error)
+    });
   }
 });
 
