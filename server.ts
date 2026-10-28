@@ -20,6 +20,12 @@ console.log("====================================");
 import { db, checkDbConnection, getLastDbError, getDbTargetInfo } from "./src/db/index.ts";
 import { supabaseAdmin, createSupabaseAuthClient } from "./src/lib/supabase-admin.ts";
 import { requireAuth, ownsUid, AuthRequest } from "./src/middleware/auth.ts";
+import {
+  verificarTokenGoogle,
+  verificarTokenApple,
+  TokenSocialInvalido,
+  type SocialIdentity
+} from "./src/lib/social-auth.ts";
 import { 
   usuarios, 
   perfisEditaveis, 
@@ -3613,6 +3619,122 @@ app.post("/api/auth/google-sync", requireAuth, async (req: AuthRequest, res) => 
     res.status(500).json({ error: "Erro ao sincronizar login do Google." });
   }
 });
+
+// ===== Login social do app (Google e Apple) =====
+// O app manda o id_token do provedor; aqui ele é verificado (assinatura, emissor,
+// público e validade) e vira uma sessão do Supabase, no mesmo formato do
+// /api/auth/login. Quem entra pela primeira vez já tem a conta criada.
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+async function acharUidNoAuth(email: string): Promise<string | null> {
+  if (!supabaseAdmin) return null;
+  const porPagina = 200;
+  for (let pagina = 1; pagina <= 25; pagina++) {
+    const { data, error } = await supabaseAdmin.auth.admin.listUsers({ page: pagina, perPage: porPagina });
+    if (error || !data?.users?.length) return null;
+    const achado = data.users.find(u => ((u as any).email || "").toLowerCase() === email);
+    if (achado) return achado.id;
+    if (data.users.length < porPagina) return null;
+  }
+  return null;
+}
+
+async function entrarComIdentidadeSocial(identity: SocialIdentity, nomeInformado?: string) {
+  const email = identity.email;
+  const nome = (identity.name || nomeInformado || email.split("@")[0]).trim();
+  const apelido = nome.split(" ")[0] || nome;
+
+  let [user] = await db.select().from(usuarios).where(eq(usuarios.email, email)).limit(1);
+  let uid: string | null = user && UUID_RE.test(user.uid) ? user.uid : null;
+  let session: { access_token: string; refresh_token: string } | null = null;
+
+  if (supabaseAdmin) {
+    // Garante o usuário no Supabase Auth (cria se for o primeiro acesso)
+    if (!uid) {
+      const { data: created, error: createErr } = await supabaseAdmin.auth.admin.createUser({
+        email,
+        email_confirm: true,
+        user_metadata: { name: nome, nickname: apelido }
+      });
+      if (created?.user) {
+        uid = created.user.id;
+      } else if (/already|registered|exists/i.test(createErr?.message || "")) {
+        uid = await acharUidNoAuth(email);
+      }
+      if (!uid) throw new Error(createErr?.message || "Não foi possível localizar a conta no Auth.");
+    }
+
+    // Sessão sem senha: gera um link mágico e troca na hora por um par de tokens
+    const { data: link, error: linkErr } = await supabaseAdmin.auth.admin.generateLink({ type: "magiclink", email });
+    const tokenHash = link?.properties?.hashed_token;
+    const authClient = createSupabaseAuthClient();
+    if (!tokenHash || !authClient) {
+      throw new Error(linkErr?.message || "Não foi possível iniciar a sessão.");
+    }
+    const { data: verificado, error: verErr } = await authClient.auth.verifyOtp({ token_hash: tokenHash, type: "magiclink" });
+    if (!verificado?.session) {
+      throw new Error(verErr?.message || "Não foi possível iniciar a sessão.");
+    }
+    session = verificado.session;
+  }
+
+  if (!user) {
+    [user] = await db.insert(usuarios).values({
+      uid: uid || "usr-" + crypto.randomUUID(),
+      email,
+      nomeCompleto: nome,
+      apelido,
+      password: null
+    }).returning();
+  } else if (uid && user.uid !== uid) {
+    await db.update(usuarios).set({ uid, updatedAt: new Date() }).where(eq(usuarios.id, user.id));
+    user = { ...user, uid };
+  }
+
+  await ensureProfileAndWallet(user.id);
+  return buildUserResponse(user, session);
+}
+
+function rotaLoginSocial(
+  provedor: string,
+  verificar: (idToken: string) => Promise<SocialIdentity>
+) {
+  return async (req: express.Request, res: express.Response) => {
+    const idToken = req.body?.idToken;
+    if (!idToken || typeof idToken !== "string") {
+      return res.status(400).json({ error: "idToken é obrigatório." });
+    }
+
+    let identity: SocialIdentity;
+    try {
+      identity = await verificar(idToken);
+    } catch (error) {
+      if (error instanceof TokenSocialInvalido) {
+        console.warn(`[Auth ${provedor}] Token recusado:`, error.message);
+        return res.status(401).json({ error: `Não foi possível validar o login com ${provedor}.` });
+      }
+      console.error(`[Auth ${provedor}] Falha ao verificar o token:`, error);
+      return res.status(502).json({ error: `Não consegui falar com o ${provedor} agora. Tente de novo.` });
+    }
+
+    // Sem e-mail confirmado pelo provedor não dá para ligar a uma conta existente
+    if (!identity.emailVerified) {
+      return res.status(401).json({ error: `O e-mail da conta ${provedor} não está confirmado.` });
+    }
+
+    try {
+      const nomeInformado = typeof req.body?.nome === "string" ? req.body.nome : undefined;
+      res.json(await entrarComIdentidadeSocial(identity, nomeInformado));
+    } catch (error) {
+      console.error(`[Auth ${provedor}] Falha ao entrar:`, error);
+      res.status(500).json({ error: `Falha no servidor durante o login com ${provedor}.` });
+    }
+  };
+}
+
+app.post("/api/auth/google", rotaLoginSocial("Google", verificarTokenGoogle));
+app.post("/api/auth/apple", rotaLoginSocial("Apple", verificarTokenApple));
 
 // Ownership helper for resources looked up by their own id
 async function userUidMatches(usuarioId: number, tokenUid: string): Promise<boolean> {
