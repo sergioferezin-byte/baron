@@ -52,7 +52,11 @@ export interface User {
   nickname: string;
   preferredSound?: string;
   createdAt: string;
+  /** Nível de acesso do plano (decidido pelo servidor). */
   plan?: 'free' | 'premium' | 'elite';
+  planoId?: string;
+  planoNome?: string;
+  planoAte?: string | null;
   tokens?: number;
 }
 

@@ -1,20 +1,30 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# Meu Barão (web + servidor)
 
-# Run and deploy your AI Studio app
+Companheiro de escuta emocional com IA, em português. Este repositório tem o
+site (React + Vite) e o servidor (Express) que também atende o app
+`barao-app` (Capacitor). Banco: Postgres do Supabase.
 
-This contains everything you need to run your app locally.
+## Rodar na máquina
 
-View your app in AI Studio: https://ai.studio/apps/adefa3da-afc3-4e1c-b358-e52cca3063b8
+```bash
+npm install
+cp .env.example .env   # preencha as chaves
+npm run dev            # http://localhost:3000
+```
 
-## Run Locally
+## Publicar
 
-**Prerequisites:**  Node.js
+A Vercel usa o `vercel.json`: o front vai para `dist/` e o servidor é
+empacotado em `dist-server/app.mjs` e servido por `api/index.js`.
 
+Variáveis obrigatórias da área admin: `ADMIN_EMAILS` (ou `ADMIN_PASSWORD`
+com 12+ caracteres), `CONFIG_SECRET` e `APP_URL`. Veja `.env.example`.
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+## Área admin
+
+Em `/admin`: planos, Mercado Pago, chaves dos serviços de IA, usuárias,
+assinaturas, limites de uso, manutenção e personalidade do Barão. As
+configurações ficam cifradas no bucket privado `barao-config` do Supabase
+Storage, sem mudar o banco.
+
+Análise completa e próximos passos: [ANALISE-WEB.md](ANALISE-WEB.md).
