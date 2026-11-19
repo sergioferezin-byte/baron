@@ -11,10 +11,11 @@ import {
   Music, Copy, Trash, Check, Volume2, Sliders, ChevronRight, RotateCcw,
   FileText, Flame, Disc, Heart, ArrowRight, CornerDownRight, ListMusic,
   Send, AlertCircle, RefreshCw, Mic, MicOff, BookOpen, ArrowLeft, X,
-  Download, Radio
+  Download, Radio, Camera
 } from "lucide-react";
 import { User } from "../types";
 import { requestBaraoSong } from "../utils/baraoMusic";
+import { requestBaraoImageUrl } from "../utils/baraoImage";
 import { syncSongs, saveCloudSong, deleteCloudSong } from "../utils/supabaseSync";
 import BaraoPaywall from "./BaraoPaywall";
 
@@ -94,6 +95,10 @@ export default function AudioTherapy({ currentUser, onPromptAuth, onUserUpdate, 
   // Gravação da canção no estúdio (Suno)
   const [recordingSongId, setRecordingSongId] = useState<string | null>(null);
   const [songError, setSongError] = useState<string | null>(null);
+  // Foto do Barão como capa da canção (foto e música juntas)
+  const [revelandoCapaId, setRevelandoCapaId] = useState<string | null>(null);
+  const compositionsRef = useRef<Composition[]>([]);
+  const [fotoJuntoDaCancao, setFotoJuntoDaCancao] = useState(true);
   // Número de série: só o resultado da sincronização mais recente vale
   const songSyncRef = useRef(0);
   const [composingStep, setComposingStep] = useState(0);
@@ -107,6 +112,10 @@ export default function AudioTherapy({ currentUser, onPromptAuth, onUserUpdate, 
     }
     return [];
   });
+  // Sempre a lista mais recente (a foto pode ficar pronta durante a gravação)
+  useEffect(() => {
+    compositionsRef.current = compositions;
+  }, [compositions]);
 
   const [activeComposition, setActiveComposition] = useState<Composition | null>(() => {
     const storeKey = currentUser ? `mb_compositions_${currentUser.id}` : "mb_compositions_guest";
@@ -838,6 +847,54 @@ export default function AudioTherapy({ currentUser, onPromptAuth, onUserUpdate, 
     }
   };
 
+  // Atualiza uma composição (tela, aparelho e banco) sem depender de um
+  // estado antigo: a foto e a canção podem ficar prontas em momentos diferentes
+  const atualizarComposicao = (id: string, mudancas: Partial<Composition>) => {
+    setCompositions(prev => {
+      const atualizadas = prev.map(c => (c.id === id ? { ...c, ...mudancas } : c));
+      const storeKey = currentUser ? `mb_compositions_${currentUser.id}` : "mb_compositions_guest";
+      localStorage.setItem(storeKey, JSON.stringify(atualizadas));
+      const salva = atualizadas.find(c => c.id === id);
+      if (currentUser && salva) saveCloudSong(currentUser.id, salva).catch(() => {});
+      return atualizadas;
+    });
+    setActiveComposition(prev => (prev && prev.id === id ? { ...prev, ...mudancas } : prev));
+  };
+
+  // Capa feita pelo Barão (foto gerada e guardada no nosso Storage), e não a
+  // capa genérica do Suno
+  const capaEhDoBarao = (url?: string) => !!url && url.includes("/barao-imagens/");
+
+  // O Barão revela uma foto dele para acompanhar a canção
+  const revelarCapaDoBarao = async (comp: Composition) => {
+    if (revelandoCapaId) return;
+    setSongError(null);
+    setRevelandoCapaId(comp.id);
+    try {
+      const trecho = (comp.lyrics || "")
+        .replace(/\[.*?\]/g, "")
+        .split("\n")
+        .filter(Boolean)
+        .slice(0, 3)
+        .join(" / ");
+      const cena =
+        "Retrato do Barão como o cantor desta canção, num cenário que traduz o clima dela. " +
+        `Canção ${comp.title}, estilo ${comp.genre || "balada romântica"}. ` +
+        `O que ele sente: ${(comp.baronComment || "").slice(0, 220)}. ` +
+        `Trecho: ${trecho}`;
+      const url = await requestBaraoImageUrl(comp.title, cena.slice(0, 600));
+      if (!url) {
+        setSongError("Não consegui revelar a foto agora. Tente de novo em instantes.");
+        return;
+      }
+      atualizarComposicao(comp.id, { coverUrl: url });
+    } catch (err) {
+      setSongError(err instanceof Error ? err.message : "Não consegui revelar a foto agora.");
+    } finally {
+      setRevelandoCapaId(null);
+    }
+  };
+
   // Grava a canção de verdade no estúdio (kie.ai + Suno)
   const handleGenerateSong = async (comp: Composition) => {
     if (recordingSongId) return;
@@ -846,6 +903,11 @@ export default function AudioTherapy({ currentUser, onPromptAuth, onUserUpdate, 
 
     // Silencia o recital falado para não competir com a canção
     if (isReciting) handleStopRecital();
+
+    // Foto e música juntas: a foto do Barão é revelada enquanto o estúdio grava
+    if (fotoJuntoDaCancao && !capaEhDoBarao(comp.coverUrl)) {
+      revelarCapaDoBarao(comp);
+    }
 
     try {
       const result = await requestBaraoSong(comp.title, comp.styleTags, comp.lyrics);
@@ -856,28 +918,10 @@ export default function AudioTherapy({ currentUser, onPromptAuth, onUserUpdate, 
       }
 
       const track = result.tracks[0];
-      const updated = compositions.map(c =>
-        c.id === comp.id
-          ? { ...c, audioUrl: track.audioUrl, coverUrl: track.imageUrl || undefined }
-          : c
-      );
-      setCompositions(updated);
-      setActiveComposition(prev =>
-        prev && prev.id === comp.id
-          ? { ...prev, audioUrl: track.audioUrl, coverUrl: track.imageUrl || undefined }
-          : prev
-      );
-
-      const storeKey = currentUser ? `mb_compositions_${currentUser.id}` : "mb_compositions_guest";
-      localStorage.setItem(storeKey, JSON.stringify(updated));
-
-      // Grava a canção (URL do Storage) na linha do banco
-      if (currentUser) {
-        const savedComp = updated.find(c => c.id === comp.id);
-        if (savedComp) {
-          saveCloudSong(currentUser.id, savedComp).catch(() => {});
-        }
-      }
+      // Mantém a foto do Barão como capa; a capa do Suno só entra se não houver
+      const atual = compositionsRef.current.find(c => c.id === comp.id);
+      const coverUrl = capaEhDoBarao(atual?.coverUrl) ? atual?.coverUrl : track.imageUrl || atual?.coverUrl;
+      atualizarComposicao(comp.id, { audioUrl: track.audioUrl, coverUrl });
     } catch (err) {
       console.error("[Ateliê] Falha ao gravar canção:", err);
       setSongError("Não consegui gravar a canção neste instante. Tente novamente.");
@@ -2029,6 +2073,28 @@ export default function AudioTherapy({ currentUser, onPromptAuth, onUserUpdate, 
                             )}
                           </button>
                           <button
+                            onClick={() => revelarCapaDoBarao(activeComposition)}
+                            disabled={!!revelandoCapaId}
+                            className="flex items-center gap-1 px-2.5 py-1.5 border border-barao-gold/50 hover:border-barao-gold text-barao-gold text-[10px] uppercase font-mono tracking-widest rounded-sm font-bold transition duration-300 disabled:opacity-50"
+                            title="O Barão revela uma foto dele para esta canção"
+                          >
+                            {revelandoCapaId === activeComposition.id ? (
+                              <RefreshCw className="h-3 w-3 mr-1 animate-spin" />
+                            ) : (
+                              <Camera className="h-3 w-3 mr-1" />
+                            )}
+                            {capaEhDoBarao(activeComposition.coverUrl) ? "Nova foto" : "Foto do Barão"}
+                          </button>
+                          <label className="flex items-center gap-1.5 text-[10px] uppercase font-mono tracking-widest text-zinc-400 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={fotoJuntoDaCancao}
+                              onChange={e => setFotoJuntoDaCancao(e.target.checked)}
+                              className="accent-barao-gold"
+                            />
+                            Gravar com foto
+                          </label>
+                          <button
                             onClick={() => handleStartRecital("comment")}
                             className="flex items-center gap-1 px-2.5 py-1.5 border border-barao-rose/50 hover:border-barao-rose/95 text-barao-gold text-[10px] uppercase font-mono tracking-widest rounded-sm font-bold transition duration-300"
                             title="O Barão lê em voz alta o comentário dele sobre a música sob melodia de piano"
@@ -2088,22 +2154,49 @@ export default function AudioTherapy({ currentUser, onPromptAuth, onUserUpdate, 
                           Baixar
                         </a>
                       </div>
-                      <div className="flex items-center gap-3">
-                        {activeComposition.coverUrl && (
-                          <img
-                            src={activeComposition.coverUrl}
-                            alt={activeComposition.title}
-                            referrerPolicy="no-referrer"
-                            className="h-14 w-14 rounded-sm object-cover border border-white/10 shrink-0"
+                      {capaEhDoBarao(activeComposition.coverUrl) ? (
+                        // Foto e música juntas: o retrato do Barão é a capa da canção
+                        <figure className="space-y-3">
+                          <div className="relative overflow-hidden rounded-sm border border-white/10">
+                            <img
+                              src={activeComposition.coverUrl}
+                              alt={`O Barão na canção ${activeComposition.title}`}
+                              className="w-full max-h-[420px] object-cover"
+                            />
+                            <figcaption className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 to-transparent p-4">
+                              <span className="font-serif italic text-lg text-white">{activeComposition.title}</span>
+                              {activeComposition.baronComment && (
+                                <span className="block font-serif italic text-xs text-barao-gold/90 mt-1 line-clamp-2">
+                                  {activeComposition.baronComment}
+                                </span>
+                              )}
+                            </figcaption>
+                          </div>
+                          <audio
+                            controls
+                            src={activeComposition.audioUrl}
+                            className="w-full"
+                            onPlay={() => { if (isReciting) handleStopRecital(); }}
                           />
-                        )}
-                        <audio
-                          controls
-                          src={activeComposition.audioUrl}
-                          className="w-full"
-                          onPlay={() => { if (isReciting) handleStopRecital(); }}
-                        />
-                      </div>
+                        </figure>
+                      ) : (
+                        <div className="flex items-center gap-3">
+                          {activeComposition.coverUrl && (
+                            <img
+                              src={activeComposition.coverUrl}
+                              alt={activeComposition.title}
+                              referrerPolicy="no-referrer"
+                              className="h-14 w-14 rounded-sm object-cover border border-white/10 shrink-0"
+                            />
+                          )}
+                          <audio
+                            controls
+                            src={activeComposition.audioUrl}
+                            className="w-full"
+                            onPlay={() => { if (isReciting) handleStopRecital(); }}
+                          />
+                        </div>
+                      )}
                     </div>
                   )}
 

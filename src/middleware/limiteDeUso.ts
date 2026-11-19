@@ -23,7 +23,8 @@ function ipDaRequisicao(req: Request): string {
 
 export function limiteDeUso(opcoes: {
   nome: string;
-  maximo: number;
+  /** Número fixo, ou função que lê o valor atual (painel admin). */
+  maximo: number | (() => number);
   janelaMs: number;
   mensagem: string;
 }) {
@@ -47,10 +48,11 @@ export function limiteDeUso(opcoes: {
     }
 
     janela.total += 1;
-    if (janela.total > opcoes.maximo) {
+    const maximo = typeof opcoes.maximo === "function" ? opcoes.maximo() : opcoes.maximo;
+    if (janela.total > maximo) {
       const esperaSegundos = Math.ceil((janela.inicio + opcoes.janelaMs - agora) / 1000);
       res.setHeader("Retry-After", String(Math.max(1, esperaSegundos)));
-      console.warn(`[Limite ${opcoes.nome}] ${ip} passou de ${opcoes.maximo} pedidos`);
+      console.warn(`[Limite ${opcoes.nome}] ${ip} passou de ${maximo} pedidos`);
       return res.status(429).json({ error: opcoes.mensagem });
     }
 

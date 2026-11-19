@@ -7,6 +7,8 @@
  * e/ou a foto de perfil da usuária, enviada em userPhoto) para manter os
  * rostos fiéis. Devolve a URL da imagem, ou null quando indisponível.
  */
+import { apiFetch } from "./supabaseSync";
+
 export async function requestBaraoImageUrl(
   title: string,
   description: string,
@@ -15,17 +17,16 @@ export async function requestBaraoImageUrl(
   uid?: string
 ): Promise<string | null> {
   try {
-    const createRes = await fetch("/api/image/generate", {
+    // apiFetch manda o token: o servidor busca a foto de perfil e o retrato
+    // do Barão da própria conta (o uid do corpo é ignorado)
+    const createRes = await apiFetch("/api/image/generate", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         title,
         description,
         userPhoto: userPhoto || null,
         // Foto anexada à lembrança: sempre usada como base/referência da cena
-        attachedPhoto: attachedPhoto || null,
-        // uid permite ao servidor buscar a foto de perfil no banco de dados
-        uid: uid || null
+        attachedPhoto: attachedPhoto || null
       })
     });
     const created = await createRes.json().catch(() => null);

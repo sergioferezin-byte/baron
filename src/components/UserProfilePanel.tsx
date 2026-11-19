@@ -2234,111 +2234,36 @@ export default function UserProfilePanel({ currentUser, onTabChange, onUserUpdat
                 <div className="p-3 bg-black/40 border border-white/5 rounded-sm space-y-1.5 font-mono text-[10.5px]">
                   <div className="flex justify-between items-center text-zinc-400">
                     <span>Plano Ativo:</span>
-                    <span className={`font-serif px-2 py-0.5 rounded-sm border uppercase text-[9px] font-bold ${
+                    <span className={`font-serif px-2 py-0.5 rounded-sm border uppercase text-[10px] font-bold ${
                       currentUser.plan === "elite"
                         ? "bg-barao-gold/10 border-barao-gold/30 text-barao-gold"
                         : currentUser.plan === "premium"
                         ? "bg-barao-rose/10 border-barao-rose/30 text-barao-rose"
                         : "bg-zinc-800 border-white/5 text-zinc-400"
                     }`}>
-                      {currentUser.plan || "Grátis"}
+                      {currentUser.planoNome || "Plano Grátis"}
                     </span>
                   </div>
-                  
-                  <div className="flex justify-between items-center text-zinc-350">
-                    <span>Disponível:</span>
-                    {currentUser.plan === "elite" ? (
-                      <span className="text-barao-gold">Infinitos ♾️</span>
-                    ) : (
-                      <span className="text-white font-bold">
-                        {currentUser.tokens !== undefined ? currentUser.tokens : (currentUser.plan === "premium" ? 2500 : 100)} Tokens
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                {/* Sandbox Controls */}
-                <div className="space-y-2 pt-1">
-                  <span className="block font-mono text-[8px] uppercase tracking-wider text-zinc-500 font-bold">
-                    Sandbox de Simulação de Pagamento:
-                  </span>
-                  
-                  {/* Mode Toggles */}
-                  <div className="grid grid-cols-3 gap-1.5 text-center text-[9px] font-mono uppercase tracking-wider">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const updated: User = {
-                          ...currentUser,
-                          plan: "free",
-                          tokens: 100
-                        };
-                        if (onUserUpdate) onUserUpdate(updated);
-                      }}
-                      className={`py-1.5 border rounded-sm transition ${
-                        currentUser.plan === "free" || !currentUser.plan
-                          ? "bg-zinc-800 border-zinc-700 text-white font-bold"
-                          : "bg-black border-white/5 text-zinc-500 hover:text-white"
-                      }`}
-                    >
-                      Grátis
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const updated: User = {
-                          ...currentUser,
-                          plan: "premium",
-                          tokens: 2500
-                        };
-                        if (onUserUpdate) onUserUpdate(updated);
-                      }}
-                      className={`py-1.5 border rounded-sm transition ${
-                        currentUser.plan === "premium"
-                          ? "bg-barao-rose/15 border-barao-rose text-barao-rose font-bold"
-                          : "bg-black border-white/5 text-zinc-500 hover:text-white"
-                      }`}
-                    >
-                      Premium
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const updated: User = {
-                          ...currentUser,
-                          plan: "elite",
-                          tokens: 9999999
-                        };
-                        if (onUserUpdate) onUserUpdate(updated);
-                      }}
-                      className={`py-1.5 border rounded-sm transition ${
-                        currentUser.plan === "elite"
-                          ? "bg-barao-gold/15 border-barao-gold text-barao-gold font-bold"
-                          : "bg-black border-white/5 text-zinc-500 hover:text-white"
-                      }`}
-                    >
-                      Elite
-                    </button>
-                  </div>
-
-                  {/* Recharge Tokens */}
-                  {currentUser.plan !== "elite" && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const curTokens = currentUser.tokens !== undefined ? currentUser.tokens : (currentUser.plan === "premium" ? 2500 : 100);
-                        const updated: User = {
-                          ...currentUser,
-                          tokens: curTokens + 500
-                        };
-                        if (onUserUpdate) onUserUpdate(updated);
-                      }}
-                      className="w-full h-9 border border-barao-rose/30 text-barao-rose hover:bg-barao-rose hover:text-black transition text-[9px] uppercase font-mono font-semibold tracking-wider rounded-sm flex items-center justify-center gap-1 bg-black"
-                    >
-                      <span>Simular Recarga (+500 Tokens)</span>
-                    </button>
+                  {currentUser.planoAte && (
+                    <div className="flex justify-between items-center text-zinc-400">
+                      <span>Válido até:</span>
+                      <span className="text-white">{new Date(currentUser.planoAte).toLocaleDateString("pt-BR")}</span>
+                    </div>
                   )}
+                  <div className="flex justify-between items-center text-zinc-400">
+                    <span>Créditos:</span>
+                    <span className="text-white font-bold">{(currentUser.tokens ?? 0).toLocaleString("pt-BR")}</span>
+                  </div>
                 </div>
+
+                {/* O plano só muda por pagamento confirmado (Mercado Pago) ou pelo admin */}
+                <button
+                  type="button"
+                  onClick={() => onTabChange?.("evolucao")}
+                  className="w-full h-10 border border-barao-rose/30 text-barao-rose hover:bg-barao-rose hover:text-black transition text-[11px] uppercase font-mono font-semibold tracking-wider rounded-sm flex items-center justify-center gap-1 bg-black"
+                >
+                  {currentUser.plan === "free" || !currentUser.plan ? "Conhecer os planos" : "Ver meu plano"}
+                </button>
               </div>
             ) : (
               <div className="space-y-2 text-[11px] font-serif italic text-zinc-400">

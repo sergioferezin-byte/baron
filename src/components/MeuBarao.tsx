@@ -313,11 +313,11 @@ export default function MeuBarao({
     setGenerationSuccess(false);
 
     try {
-      const response = await fetch("/api/barao/generate-avatar", {
+      // O token (apiFetch) identifica a conta: o servidor grava o retrato
+      // gerado no perfil dela (padrão permanente)
+      const response = await apiFetch("/api/barao/generate-avatar", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        // uid: o servidor grava o retrato gerado no perfil (padrão permanente)
-        body: JSON.stringify({ prompt: promptInput, uid: currentUser?.id || null })
+        body: JSON.stringify({ prompt: promptInput })
       });
 
       if (!response.ok) {

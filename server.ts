@@ -7,15 +7,12 @@ import fs from "fs";
 
 dotenv.config();
 
-// Diagnostic logging for Supabase environment variables
-console.log("=== SUPABASE STARTUP DIAGNOSTICS ===");
-console.log("VITE_SUPABASE_URL defined:", !!process.env.VITE_SUPABASE_URL, process.env.VITE_SUPABASE_URL ? `(Length: ${process.env.VITE_SUPABASE_URL.length}, Start: ${process.env.VITE_SUPABASE_URL.substring(0, 15)}...)` : "(empty)");
-console.log("VITE_SUPABASE_ANON_KEY defined:", !!process.env.VITE_SUPABASE_ANON_KEY, process.env.VITE_SUPABASE_ANON_KEY ? `(Length: ${process.env.VITE_SUPABASE_ANON_KEY.length}, Start: ${process.env.VITE_SUPABASE_ANON_KEY.substring(0, 10)}...)` : "(empty)");
-console.log("SUPABASE_SERVICE_ROLE_KEY defined:", !!process.env.SUPABASE_SERVICE_ROLE_KEY, process.env.SUPABASE_SERVICE_ROLE_KEY ? `(Length: ${process.env.SUPABASE_SERVICE_ROLE_KEY.length}, Start: ${process.env.SUPABASE_SERVICE_ROLE_KEY.substring(0, 10)}...)` : "(empty)");
-if (!process.env.SUPABASE_SERVICE_ROLE_KEY && process.env.VITE_SUPABASE_ANON_KEY) {
-  console.warn("WARNING: SUPABASE_SERVICE_ROLE_KEY is missing! Falling back to VITE_SUPABASE_ANON_KEY. Admin auth operations (createUser, listUsers) will fail with 401/403!");
-}
-console.log("====================================");
+// Diagnóstico de inicialização: só diz se as variáveis existem, nunca o valor
+console.log("[Inicio] Supabase:", {
+  url: !!process.env.VITE_SUPABASE_URL,
+  anonKey: !!process.env.VITE_SUPABASE_ANON_KEY,
+  serviceRole: !!process.env.SUPABASE_SERVICE_ROLE_KEY
+});
 
 import { db, checkDbConnection, getLastDbError, getDbTargetInfo } from "./src/db/index.ts";
 import { supabaseAdmin, createSupabaseAuthClient } from "./src/lib/supabase-admin.ts";
@@ -43,6 +40,10 @@ import {
 } from "./src/db/schema.ts";
 import { eq, desc, and } from "drizzle-orm";
 import { limiteDeUso } from "./src/middleware/limiteDeUso.ts";
+import { requireAdmin } from "./src/middleware/adminAuth.ts";
+import { lerConfig, aplicarIaNoAmbiente, configPadrao, type ConfigSistema } from "./src/lib/configSistema.ts";
+import { planoAtualDe } from "./src/lib/assinaturas.ts";
+import { registrarRotasAdminEPagamentos } from "./src/rotas/adminEPagamentos.ts";
 
 const app = express();
 const PORT = 3000;
@@ -50,21 +51,36 @@ const PORT = 3000;
 app.use(express.json({ limit: "15mb" }));
 app.use(express.urlencoded({ limit: "15mb", extended: true }));
 
-// Rotas que gastam créditos pagos (ElevenLabs e kie.ai) e aceitam visitantes:
-// limite por IP para ninguém esvaziar os créditos com chamadas em série
+// Configuração do painel admin (Storage do Supabase, cache de 30 s): prompt,
+// manutenção, limites e chaves de IA trocadas sem novo deploy
+let configAtual: ConfigSistema = configPadrao();
+app.use("/api", async (_req, _res, next) => {
+  try {
+    configAtual = await lerConfig();
+    aplicarIaNoAmbiente(configAtual);
+    atualizarAjustesIa();
+  } catch (err) {
+    console.error("[Config] Falha ao aplicar configuração:", err);
+  }
+  next();
+});
+
+// Rotas que gastam créditos pagos e aceitam visitantes: limite por IP para
+// ninguém esvaziar os créditos com chamadas em série. Os números vêm do
+// painel admin (Geral > Limites).
 const DEZ_MINUTOS = 10 * 60 * 1000;
 app.use(
   "/api/voice",
   limiteDeUso({
     nome: "voz",
-    maximo: 40,
+    maximo: () => configAtual.limites.voz,
     janelaMs: DEZ_MINUTOS,
     mensagem: "Muitas leituras em pouco tempo. Respire um instante e tente de novo."
   })
 );
 const limiteImagem = limiteDeUso({
   nome: "imagem",
-  maximo: 8,
+  maximo: () => configAtual.limites.imagem,
   janelaMs: DEZ_MINUTOS,
   mensagem: "Muitas imagens em pouco tempo. Espere alguns minutos para o Barão revelar outra."
 });
@@ -74,251 +90,31 @@ app.use(
   "/api/music/generate",
   limiteDeUso({
     nome: "musica",
-    maximo: 4,
+    maximo: () => configAtual.limites.musica,
     janelaMs: DEZ_MINUTOS,
     mensagem: "Muitas canções em pouco tempo. Espere alguns minutos para pedir outra."
   })
 );
-
-// Global customizable configuration variables (Persisted to admin_configs.json)
-let isMaintenanceMode = false;
-let systemPromptOverride: string | null = null;
-let currentAdminPassword = process.env.ADMIN_PASSWORD || "barao123";
-
-let globalPlans = [
-  {
-    id: "free",
-    name: "Acolhimento Grátis",
-    slug: "free",
-    description: "Plano vitalício de entrada com limites moderados para ninar suas primeiras reflexões.",
-    price: 0.00,
-    maxDailyMessages: 15,
-    hasPersistentMemory: false,
-    allowedMediaTypes: ["text"]
-  },
-  {
-    id: "premium",
-    name: "Sintonia Premium",
-    slug: "premium",
-    description: "Desbloqueia memórias afetivas persistentes (RAG), intimidade contínua e frentes de soundhealing e voz.",
-    price: 49.90,
-    maxDailyMessages: 100,
-    hasPersistentMemory: true,
-    allowedMediaTypes: ["text", "audio"]
-  },
-  {
-    id: "elite",
-    name: "Lorde Elite",
-    slug: "elite",
-    description: "Intimidade absoluta e profunda. Customizações exclusivas, trilhas poéticas e alteração estética do Barão por IA.",
-    price: 99.90,
-    maxDailyMessages: 999999,
-    hasPersistentMemory: true,
-    allowedMediaTypes: ["text", "audio", "image", "music"]
-  }
-];
-
-const ADMIN_CONFIG_FILE = path.join(process.cwd(), "admin_configs.json");
-
-function loadAdminConfigs() {
-  try {
-    if (fs.existsSync(ADMIN_CONFIG_FILE)) {
-      const data = JSON.parse(fs.readFileSync(ADMIN_CONFIG_FILE, "utf-8"));
-      isMaintenanceMode = !!data.isMaintenanceMode;
-      systemPromptOverride = data.systemPromptOverride || null;
-      if (Array.isArray(data.globalPlans)) {
-        globalPlans = data.globalPlans;
-      }
-      console.log("[Admin Config] Loaded persisted admin configurations.", { isMaintenanceMode, systemPromptOverrideLength: systemPromptOverride?.length || 0 });
-    }
-  } catch (err) {
-    console.error("[Admin Config] Failed to load persisted configs:", err);
-  }
+// Conversa e textos gerados por IA (DeepSeek/Gemini)
+const limiteChat = limiteDeUso({
+  nome: "chat",
+  maximo: () => configAtual.limites.chat,
+  janelaMs: DEZ_MINUTOS,
+  mensagem: "Muitas mensagens em pouco tempo. Respire um instante e me conte de novo daqui a pouco."
+});
+for (const rota of ["/api/chat", "/api/diary/generate", "/api/story/generate", "/api/song/compose", "/api/meditation"]) {
+  // /api/chat/media tem limite próprio (upload)
+  app.use(rota, (req, res, next) => (req.baseUrl === "/api/chat" && req.path !== "/" ? next() : limiteChat(req, res, next)));
 }
-
-function saveAdminConfigs() {
-  try {
-    fs.writeFileSync(
-      ADMIN_CONFIG_FILE,
-      JSON.stringify({ isMaintenanceMode, systemPromptOverride, globalPlans }, null, 2),
-      "utf-8"
-    );
-    console.log("[Admin Config] Successfully saved configuration changes.");
-  } catch (err) {
-    console.error("[Admin Config] Failed to save configs:", err);
-  }
-}
-
-// Initial bootstrap load of configurations
-loadAdminConfigs();
-
-function getMaintenanceHTML() {
-  return `<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Meu Barão - Momento de Quietude</title>
-  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;1,400&family=Inter:wght@300;400&display=swap" rel="stylesheet">
-  <style>
-    body {
-      background-color: #0B0B0B;
-      color: #F4F4F5;
-      font-family: 'Inter', sans-serif;
-      margin: 0;
-      padding: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      overflow-x: hidden;
-    }
-    .container {
-      max-width: 600px;
-      text-align: center;
-      padding: 40px 20px;
-      z-index: 2;
-    }
-    .emblem {
-      width: 100px;
-      height: 100px;
-      margin: 0 auto 30px auto;
-      border: 1px solid rgba(217, 186, 122, 0.3);
-      background-color: #121212;
-      border-radius: 4px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      box-shadow: 0 0 20px rgba(186, 37, 74, 0.15);
-      animation: pulse 4s infinite ease-in-out;
-    }
-    .emblem-core {
-      font-family: 'Playfair Display', serif;
-      font-size: 28px;
-      color: #D9BA7A;
-      font-style: italic;
-      font-weight: 600;
-    }
-    h2 {
-      font-family: 'Playfair Display', serif;
-      font-size: 32px;
-      font-weight: 300;
-      margin-bottom: 20px;
-      letter-spacing: -0.01em;
-      color: #FFFFFF;
-    }
-    h2 span {
-      display: block;
-      font-size: 18px;
-      color: #BA254A;
-      font-family: 'Inter', sans-serif;
-      text-transform: uppercase;
-      letter-spacing: 0.25em;
-      margin-bottom: 12px;
-      font-weight: 600;
-    }
-    p {
-      color: rgba(244, 244, 245, 0.65);
-      font-size: 15px;
-      line-height: 1.7;
-      font-style: italic;
-      margin-bottom: 35px;
-      font-family: 'Playfair Display', serif;
-    }
-    .status-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 10px;
-      background-color: rgba(186, 37, 74, 0.1);
-      border: 1px solid rgba(186, 37, 74, 0.25);
-      padding: 6px 14px;
-      border-radius: 2px;
-      text-transform: uppercase;
-      letter-spacing: 0.15em;
-      color: #D9BA7A;
-      font-weight: 600;
-    }
-    .status-dot {
-      width: 6px;
-      height: 6px;
-      background-color: #BA254A;
-      border-radius: 50%;
-      box-shadow: 0 0 8px #BA254A;
-      animation: blink 2s infinite ease-in-out;
-    }
-    @keyframes pulse {
-      0%, 100% { transform: scale(1); box-shadow: 0 0 20px rgba(186, 37, 74, 0.15); }
-      50% { transform: scale(1.03); box-shadow: 0 0 30px rgba(217, 186, 122, 0.3); }
-    }
-    @keyframes blink {
-      0%, 100% { opacity: 0.4; }
-      50% { opacity: 1; }
-    }
-    .bypass-link {
-      margin-top: 50px;
-      display: block;
-      font-size: 11px;
-      color: rgba(255, 255, 255, 0.2);
-      text-decoration: none;
-      font-family: monospace;
-      letter-spacing: 0.1em;
-      transition: color 0.3s;
-    }
-    .bypass-link:hover {
-      color: #D9BA7A;
-    }
-    .bypass-form {
-      margin-top: 20px;
-      display: none;
-    }
-    .bypass-form input {
-      background-color: #161616;
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      padding: 8px 12px;
-      color: white;
-      text-align: center;
-      font-family: monospace;
-      font-size: 12px;
-      outline: none;
-      border-radius: 2px;
-      width: 140px;
-    }
-    .bypass-form input:focus {
-      border-color: #BA254A;
-    }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="emblem">
-      <div class="emblem-core">MB</div>
-    </div>
-    
-    <h2>
-      <span>Recolhimento Temporário</span>
-      Momento de Quietude e Sintonização
-    </h2>
-    
-    <p>
-      &ldquo;O Barão está recolhendo seus pensamentos neste instante. Um breve silêncio se faz necessário para que possamos regular as frequências mais profundas da nossa sintonia emocional e aproximar os acordes do nosso abrigo portátil de você. Voltaremos em breve, com ainda mais presença.&rdquo;
-    </p>
-    
-    <div class="status-badge">
-      <div class="status-dot"></div>
-      Santuário em Manutenção
-    </div>
-    
-    <a href="#" class="bypass-link" onclick="document.getElementById('form').style.display='block'; return false;">🔐 Sintonizar Painel</a>
-    <div id="form" class="bypass-form">
-      <form action="/" method="GET">
-        <input type="password" name="bypass" placeholder="Senha do Portal..." required />
-      </form>
-    </div>
-  </div>
-</body>
-</html>`;
-}
+// Envio de fotos e vídeos para o Storage
+const limiteUpload = limiteDeUso({
+  nome: "upload",
+  maximo: () => configAtual.limites.upload,
+  janelaMs: DEZ_MINUTOS,
+  mensagem: "Muitos envios em pouco tempo. Espere alguns minutos."
+});
+app.use("/api/chat/media", limiteUpload);
+app.use("/api/image/upload", limiteUpload);
 
 // Lazy-initialize Gemini API to prevent crash on startup if key is missing
 let aiClient: GoogleGenAI | null = null;
@@ -350,7 +146,7 @@ function getGeminiClient(): GoogleGenAI {
 // DeepSeek (API compatível com OpenAI) — usado exclusivamente no chat principal.
 // Os demais recursos (diário, crônicas, músicas, meditação) continuam no Gemini.
 const DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions";
-const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-chat";
+let DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-chat";
 
 interface DeepSeekMessage {
   role: "system" | "user" | "assistant";
@@ -558,7 +354,7 @@ const BARAO_REFERENCE_IMAGE_URL =
 // ===== Suno (kie.ai) — geração musical do Ateliê de Composição =====
 // A API do Suno no kie.ai é separada da API de jobs: usa /generate e
 // /generate/record-info, com seus próprios estados.
-const SUNO_MODEL = process.env.SUNO_MODEL || "V5";
+let SUNO_MODEL = process.env.SUNO_MODEL || "V5";
 const MUSIC_BUCKET = "barao-musicas";
 
 async function createSunoTask(input: {
@@ -647,10 +443,10 @@ async function persistSunoAudio(sunoUrl: string): Promise<string> {
 // ===== Voz principal do Barão (ElevenLabs) =====
 // Falamos direto com a API da ElevenLabs; a ponte antiga do kie.ai está
 // fora do ar. O Azure segue como reserva se a chave ou a voz falharem.
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const ELEVENLABS_VOICE_ID =
+let ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+let ELEVENLABS_VOICE_ID =
   process.env.ELEVENLABS_VOICE_ID || "PxO5uAS3Vy1IJcooXHmk";
-const ELEVENLABS_MODEL =
+let ELEVENLABS_MODEL =
   process.env.ELEVENLABS_MODEL || "eleven_multilingual_v2";
 const ELEVENLABS_OUTPUT_FORMAT =
   process.env.ELEVENLABS_OUTPUT_FORMAT || "mp3_44100_128";
@@ -659,10 +455,10 @@ const ELEVENLABS_OUTPUT_FORMAT =
 // Voz masculina brasileira de verdade, síncrona (um pedido devolve o MP3)
 // e com camada gratuita permanente de 500 mil caracteres/mês. Substituiu o
 // kie.ai/ElevenLabs, cuja ponte de TTS está fora do ar desde jul/2026.
-const AZURE_SPEECH_REGION = process.env.AZURE_SPEECH_REGION || "brazilsouth";
+let AZURE_SPEECH_REGION = process.env.AZURE_SPEECH_REGION || "brazilsouth";
 // Vozes masculinas pt-BR: Antonio, Donato, Fabio, Humberto, Julio,
 // Nicolau, Valerio. Trocar por AZURE_TTS_VOICE sem novo deploy.
-const AZURE_TTS_VOICE = process.env.AZURE_TTS_VOICE || "pt-BR-AntonioNeural";
+let AZURE_TTS_VOICE = process.env.AZURE_TTS_VOICE || "pt-BR-AntonioNeural";
 // O Barão fala pausado; equivale ao speed 0.92 que usávamos no ElevenLabs
 const AZURE_TTS_RATE = process.env.AZURE_TTS_RATE || "-8%";
 
@@ -685,7 +481,7 @@ const GEMINI_TTS_VOICE = process.env.GEMINI_TTS_VOICE || "Charon"; // masculina,
 // Modelo que "olha" as fotos e os quadros de vídeo enviados no chat. O
 // Flash-Lite é rápido e barato; se não aceitar imagem no futuro, troque por
 // gemini-2.5-flash sem mexer no resto do código.
-const VISION_MODEL = process.env.VISION_MODEL || "gemini-3-flash-preview";
+let VISION_MODEL = process.env.VISION_MODEL || "gemini-3-flash-preview";
 
 // O Gemini devolve PCM cru; o navegador precisa do cabeçalho WAV
 function pcmToWav(pcm: Buffer, sampleRate = 24000, channels = 1, bitsPerSample = 16): Buffer {
@@ -1277,11 +1073,27 @@ async function imagePartFromUrl(url: string): Promise<any | null> {
 // Modelos de visão em ordem de preferência. O nome do modelo de imagem muda
 // com o tempo; se o primeiro não existir, os seguintes assumem sem quebrar o
 // chat (antes, um nome inválido deixava o Barão cego em silêncio).
-const VISION_MODELS = Array.from(new Set([
-  process.env.VISION_MODEL,
-  "gemini-3-flash-preview",
-  "gemini-3.8-flash"
-].filter((m): m is string => typeof m === "string" && m.trim().length > 0)));
+function listarModelosVisao(): string[] {
+  return Array.from(new Set([
+    process.env.VISION_MODEL,
+    "gemini-3-flash-preview",
+    "gemini-3.8-flash"
+  ].filter((m): m is string => typeof m === "string" && m.trim().length > 0)));
+}
+let VISION_MODELS = listarModelosVisao();
+
+// Relê os ajustes de IA depois que o painel admin os coloca em process.env
+function atualizarAjustesIa() {
+  DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-chat";
+  SUNO_MODEL = process.env.SUNO_MODEL || "V5";
+  ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+  ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "PxO5uAS3Vy1IJcooXHmk";
+  ELEVENLABS_MODEL = process.env.ELEVENLABS_MODEL || "eleven_multilingual_v2";
+  AZURE_SPEECH_REGION = process.env.AZURE_SPEECH_REGION || "brazilsouth";
+  AZURE_TTS_VOICE = process.env.AZURE_TTS_VOICE || "pt-BR-AntonioNeural";
+  VISION_MODEL = process.env.VISION_MODEL || "gemini-3-flash-preview";
+  VISION_MODELS = listarModelosVisao();
+}
 
 async function generateWithVisionFallback(
   ai: any,
@@ -1507,7 +1319,7 @@ app.post("/api/chat/media/sign", async (req, res) => {
 
 // Diagnóstico da visão: mostra quais modelos respondem e se a imagem do
 // Storage pode ser lida. Serve para achar o motivo quando o Barão "não vê".
-app.post("/api/chat/media/diag", async (req, res) => {
+app.post("/api/chat/media/diag", requireAdmin, async (req, res) => {
   const url = typeof req.body?.url === "string" ? req.body.url : null;
   const host = supabaseMediaHost();
   const result: any = {
@@ -1591,7 +1403,7 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-    let dynamicSystemInstruction = `${systemPromptOverride || SYSTEM_PROMPT}\n\n${CONVERSATIONAL_RHYTHM}\n\n${MEMORY_RULES}`;
+    let dynamicSystemInstruction = `${configAtual.promptSistema || SYSTEM_PROMPT}\n\n${CONVERSATIONAL_RHYTHM}\n\n${MEMORY_RULES}`;
 
     // Dynamically inject presence prompts based on selected voice tones
     if (userProfile && userProfile.aiVoiceTone && Array.isArray(userProfile.aiVoiceTone)) {
@@ -2768,9 +2580,23 @@ app.delete("/api/songs/:id", requireAuth, async (req: AuthRequest, res) => {
 // Usa fotos de referência (retrato do Barão e/ou foto de perfil da usuária)
 // quando a cena pede — nesses casos o modelo é o nano-banana-2, que preserva
 // os rostos das referências; sem referências, usa o z-image (mais barato).
+// Identifica a usuária pelo token (quando houver). O uid do corpo NÃO é
+// aceito: sem isso, alguém poderia usar a foto ou o retrato de outra conta.
+async function uidDoToken(req: express.Request): Promise<string | null> {
+  const auth = req.headers.authorization;
+  if (!supabaseAdmin || !auth?.startsWith("Bearer ")) return null;
+  try {
+    const { data } = await supabaseAdmin.auth.getUser(auth.slice(7));
+    return data?.user?.id || null;
+  } catch {
+    return null;
+  }
+}
+
 app.post("/api/image/generate", async (req, res) => {
   try {
-    const { title, description, userPhoto, attachedPhoto, uid } = req.body;
+    const { title, description, userPhoto, attachedPhoto } = req.body;
+    const uid = await uidDoToken(req);
     if (!description || typeof description !== "string" || !description.trim()) {
       return res.status(400).json({ error: "description é obrigatória" });
     }
@@ -3012,7 +2838,8 @@ app.get("/api/image/status/:taskId", async (req, res) => {
 // vira o retrato padrão do Barão para essa usuária em todo o app.
 app.post("/api/barao/generate-avatar", async (req, res) => {
   try {
-    const { prompt, uid } = req.body;
+    const { prompt } = req.body;
+    const uid = await uidDoToken(req);
     if (!prompt) {
       return res.status(400).json({ error: "Prompt is required" });
     }
@@ -3130,64 +2957,10 @@ app.post("/api/barao/avatar", requireAuth, async (req: AuthRequest, res) => {
 });
 
 // ==========================================
-// ADMIN CONTROL PANEL BACKEND ENDPOINTS
+// ÁREA ADMIN, PLANOS E PAGAMENTO (Mercado Pago)
 // ==========================================
-
-// Verify password
-app.post("/api/admin/verify-password", (req, res) => {
-  const { password } = req.body;
-  if (!password) {
-    return res.status(400).json({ success: false, error: "Senha necessária." });
-  }
-  if (password === currentAdminPassword || password === "barao123") {
-    return res.json({ success: true });
-  }
-  return res.status(401).json({ success: false, error: "Senha incorreta." });
-});
-
-// Get admin configurations
-app.get("/api/admin/config", (req, res) => {
-  res.json({
-    isMaintenanceMode,
-    systemPrompt: systemPromptOverride || SYSTEM_PROMPT,
-    defaultSystemPrompt: SYSTEM_PROMPT,
-    globalPlans
-  });
-});
-
-// Update admin configurations
-app.post("/api/admin/config", (req, res) => {
-  const { isMaintenance, systemPrompt, plans, password } = req.body;
-  
-  if (password !== currentAdminPassword && password !== "barao123") {
-    return res.status(403).json({ error: "Permissão negada. Senha incorreta." });
-  }
-
-  if (typeof isMaintenance === "boolean") {
-    isMaintenanceMode = isMaintenance;
-  }
-
-  if (systemPrompt !== undefined) {
-    if (!systemPrompt || systemPrompt.trim() === "" || systemPrompt === SYSTEM_PROMPT) {
-      systemPromptOverride = null;
-    } else {
-      systemPromptOverride = systemPrompt;
-    }
-  }
-
-  if (Array.isArray(plans)) {
-    globalPlans = plans;
-  }
-
-  saveAdminConfigs();
-
-  res.json({
-    success: true,
-    isMaintenanceMode,
-    systemPrompt: systemPromptOverride || SYSTEM_PROMPT,
-    globalPlans
-  });
-});
+// Sem senha fixa: veja src/middleware/adminAuth.ts
+registrarRotasAdminEPagamentos(app, { promptPadrao: SYSTEM_PROMPT });
 
 // ==========================================
 // SYSTEM DATABASE CRUD & AUTH ENDPOINTS
@@ -3240,6 +3013,7 @@ async function ensureProfileAndWallet(usuarioId: number, preferredSound?: string
 async function buildUserResponse(user: typeof usuarios.$inferSelect, session?: { access_token: string; refresh_token: string } | null) {
   const [profile] = await db.select().from(perfisEditaveis).where(eq(perfisEditaveis.usuarioId, user.id)).limit(1);
   const [wallet] = await db.select().from(carteirasCreditos).where(eq(carteirasCreditos.usuarioId, user.id)).limit(1);
+  const plano = await planoAtualDe(user.id);
 
   let parsedBio: any = {};
   if (profile?.fatosBiografia) {
@@ -3257,8 +3031,13 @@ async function buildUserResponse(user: typeof usuarios.$inferSelect, session?: {
     name: user.nomeCompleto,
     nickname: user.apelido,
     preferredSound: parsedBio.preferredSound || "chuva",
-    plan: parsedBio.plan || "free",
-    tokens: wallet?.tokensDisponiveis || 100,
+    // Plano vem da tabela assinaturas (pagamento confirmado ou concedido no
+    // painel), nunca do que o navegador gravou no perfil
+    plan: plano.nivel,
+    planoId: plano.planoId,
+    planoNome: plano.planoNome,
+    planoAte: plano.ate,
+    tokens: wallet?.tokensDisponiveis ?? 0,
     createdAt: user.createdAt,
     session: session ? { access_token: session.access_token, refresh_token: session.refresh_token } : null
   };
@@ -3326,7 +3105,8 @@ async function seedPersonasIfEmpty() {
 // 1. Authentications
 app.post("/api/auth/register", async (req, res) => {
   try {
-    const { email, password, name, nickname, preferredSound, plan } = req.body;
+    // "plan" do corpo é ignorado: o plano só muda por pagamento ou pelo admin
+    const { email, password, name, nickname, preferredSound } = req.body;
     if (!email || !name || !password) {
       return res.status(400).json({ error: "E-mail, nome e senha são obrigatórios" });
     }
@@ -3396,7 +3176,7 @@ app.post("/api/auth/register", async (req, res) => {
       throw dbErr;
     }
 
-    await ensureProfileAndWallet(newUser.id, preferredSound, plan);
+    await ensureProfileAndWallet(newUser.id, preferredSound);
 
     res.json(await buildUserResponse(newUser, session));
   } catch (error: any) {
@@ -3405,72 +3185,29 @@ app.post("/api/auth/register", async (req, res) => {
   }
 });
 
-// Health check: reports DB and Supabase configuration status
-app.get("/api/health", async (req, res) => {
+// Health check público: só diz se está tudo de pé. O detalhe de cada
+// serviço fica no painel admin (GET /api/admin/saude).
+app.get("/api/health", async (_req, res) => {
   const dbOk = await checkDbConnection();
-  res.status(dbOk ? 200 : 503).json({
-    database: dbOk ? "ok" : "falha — verifique DATABASE_URL",
-    databaseUrlConfigured: !!process.env.DATABASE_URL,
+  res.status(dbOk ? 200 : 503).json({ ok: dbOk });
+});
+
+app.get("/api/admin/saude", requireAdmin, async (_req, res) => {
+  const dbOk = await checkDbConnection();
+  res.json({
+    database: dbOk ? "ok" : "falha",
     databaseTarget: getDbTargetInfo(),
     databaseError: dbOk ? null : getLastDbError(),
-    supabaseAuth: supabaseAdmin ? "ok" : "não configurado — verifique SUPABASE_SERVICE_ROLE_KEY",
+    supabaseAuth: supabaseAdmin ? "ok" : "não configurado",
     geminiKeyConfigured: !!process.env.GEMINI_API_KEY,
     deepseekKeyConfigured: !!process.env.DEEPSEEK_API_KEY,
     kieKeyConfigured: !!process.env.KIE_API_KEY,
-    // voz: ElevenLabs é a principal; Azure e Gemini são as reservas
     elevenLabsKeyConfigured: !!process.env.ELEVENLABS_API_KEY,
     elevenLabsVoiceId: ELEVENLABS_VOICE_ID,
     elevenLabsModel: ELEVENLABS_MODEL,
     azureSpeechConfigured: !!process.env.AZURE_SPEECH_KEY,
-    azureSpeechRegion: AZURE_SPEECH_REGION,
-    azureTtsVoice: AZURE_TTS_VOICE
+    azureSpeechRegion: AZURE_SPEECH_REGION
   });
-});
-
-app.get("/api/auth/test-supabase", async (req, res) => {
-  try {
-    const diagnostics = {
-      supabaseUrl: process.env.VITE_SUPABASE_URL ? `${process.env.VITE_SUPABASE_URL.substring(0, 15)}...` : "not set",
-      supabaseAnonKey: process.env.VITE_SUPABASE_ANON_KEY ? `${process.env.VITE_SUPABASE_ANON_KEY.substring(0, 10)}... (Length: ${process.env.VITE_SUPABASE_ANON_KEY.length})` : "not set",
-      supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY ? `${process.env.SUPABASE_SERVICE_ROLE_KEY.substring(0, 10)}... (Length: ${process.env.SUPABASE_SERVICE_ROLE_KEY.length})` : "not set",
-      clientInitialized: !!supabaseAdmin,
-      testReadTableResult: null as string | null,
-      testAdminUsersResult: null as string | null,
-      errorMsg: null as string | null
-    };
-
-    if (supabaseAdmin) {
-      // Test read 'usuarios' table
-      try {
-        const { data, error } = await supabaseAdmin.from("usuarios").select("*").limit(1);
-        if (error) {
-          diagnostics.testReadTableResult = `Error reading 'usuarios' table: ${error.message}`;
-        } else {
-          diagnostics.testReadTableResult = "Success! Can read 'usuarios' table.";
-        }
-      } catch (err: any) {
-        diagnostics.testReadTableResult = `Exception reading table: ${err.message || err}`;
-      }
-
-      // Test auth admin operations
-      try {
-        const { data, error } = await supabaseAdmin.auth.admin.listUsers();
-        if (error) {
-          diagnostics.testAdminUsersResult = `Error listUsers: ${error.message}. This confirms your service_role key is INVALID or UNAUTHORIZED for admin operations!`;
-        } else {
-          diagnostics.testAdminUsersResult = `Success! Can list auth users. Found ${data?.users?.length || 0} users in Supabase Auth.`;
-        }
-      } catch (err: any) {
-        diagnostics.testAdminUsersResult = `Exception listUsers: ${err.message || err}. (This usually means the key is a standard anon key and does not have admin privileges)`;
-      }
-    } else {
-      diagnostics.errorMsg = "supabaseAdmin is not initialized.";
-    }
-
-    res.json(diagnostics);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message || err });
-  }
 });
 
 app.post("/api/auth/login", async (req, res) => {
@@ -3839,7 +3576,11 @@ app.get("/api/profiles/:uid", requireAuth, async (req: AuthRequest, res) => {
 app.post("/api/profiles/:uid", requireAuth, async (req: AuthRequest, res) => {
   try {
     const { uid } = req.params;
-    const profileData = req.body;
+    const profileData = { ...(req.body || {}) };
+    // Plano e créditos não se mudam pelo perfil
+    delete profileData.plan;
+    delete profileData.tokens;
+    delete profileData.planoId;
 
     if (!ownsUid(req, uid)) {
       return res.status(403).json({ error: "Acesso negado a este perfil." });
@@ -4306,20 +4047,8 @@ async function bootstrapServer() {
   if (dbOk) {
     await seedPersonasIfEmpty();
   }
-  // Global Maintenance Mode check
-  app.get("*", (req, res, next) => {
-    const isApiRequest = req.path.startsWith("/api");
-    const isStaticAsset = req.path.includes("/assets") || req.path.includes(".") || req.path.includes("hot-update") || req.path.includes("ico");
-    
-    // Check for bypass in query or cookie/session. We check "?bypass=barao123" or similar
-    const hasBypass = req.query.admin_bypass === "barao123" || req.query.bypass === currentAdminPassword || req.query.bypass === "barao123";
-
-    if (isMaintenanceMode && !isApiRequest && !isStaticAsset && !hasBypass) {
-      res.send(getMaintenanceHTML());
-      return;
-    }
-    next();
-  });
+  // Modo manutenção: quem mostra a tela é o próprio site (lê /api/config-publica),
+  // o que funciona igual aqui e na Vercel.
 
   if (process.env.NODE_ENV !== "production") {
     console.log("Starting server in DEVELOPMENT mode...");

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, Suspense, lazy } from "react";
 import { Sparkles, Compass, Heart, Headphones, Scroll, Camera, ExternalLink, Moon, User as UserIcon, LogIn, LogOut, Coins, Music, Home } from "lucide-react";
 import AmbientMixer from "./components/AmbientMixer";
 import BaraoChat from "./components/BaraoChat";
@@ -20,55 +20,61 @@ import { renderAvatarSvgOrImg } from "./utils/avatar";
 import PremiumMobileMenu from "./components/PremiumMobileMenu";
 import BaraoLogo from "./components/BaraoLogo";
 import MeuBarao from "./components/MeuBarao"; // Import customized Baron management view
-import BaraoAdminDashboard from "./components/BaraoAdminDashboard"; // Import modular admin control panel
+// Painel admin só carrega quando alguém abre /admin
+const AdminPainel = lazy(() => import("./components/AdminPainel"));
 import baraoBackground from "./assets/images/barao_portrait_1779931788412.png";
 import { supabase } from "./lib/supabase";
 import { apiFetch, fetchUserProfile } from "./utils/supabaseSync";
+import { lerConfigPublica } from "./utils/configPublica";
 
 type ActiveTab = "home" | "dialogo" | "refugio" | "universo" | "evolucao" | "meubarao" | "privacy" | "terms" | "admin";
 
 const SESSION_USER_KEY = "mb_logged_user";
 
+// Cada aba tem seu endereço: dá para mandar o link direto e o "voltar" do
+// celular funciona. O Mercado Pago devolve a pessoa para /evolucao.
+const CAMINHO_DA_ABA: Record<ActiveTab, string> = {
+  home: "/",
+  dialogo: "/dialogo",
+  refugio: "/refugio",
+  universo: "/universo",
+  evolucao: "/evolucao",
+  meubarao: "/meu-barao",
+  privacy: "/privacy",
+  terms: "/terms",
+  admin: "/admin"
+};
+
+function abaDoCaminho(caminho: string): ActiveTab {
+  const limpo = caminho.replace(/\/+$/, "") || "/";
+  const achada = (Object.keys(CAMINHO_DA_ABA) as ActiveTab[]).find(aba => CAMINHO_DA_ABA[aba] === limpo);
+  return achada || "home";
+}
+
 export default function App() {
-  const [activeTab, setActiveTabState] = useState<ActiveTab>(() => {
-    if (typeof window !== "undefined") {
-      if (window.location.pathname === "/admin") return "admin";
-      if (window.location.pathname === "/privacy") return "privacy";
-      if (window.location.pathname === "/terms") return "terms";
-    }
-    return "home";
-  });
+  const [activeTab, setActiveTabState] = useState<ActiveTab>(() =>
+    typeof window !== "undefined" ? abaDoCaminho(window.location.pathname) : "home"
+  );
 
   const setActiveTab = (tab: ActiveTab) => {
     setActiveTabState(tab);
-    if (typeof window !== "undefined") {
-      if (tab === "admin") {
-        window.history.pushState({}, "", "/admin");
-      } else if (tab === "privacy") {
-        window.history.pushState({}, "", "/privacy");
-      } else if (tab === "terms") {
-        window.history.pushState({}, "", "/terms");
-      } else if (tab === "home") {
-        window.history.pushState({}, "", "/");
-      }
+    if (typeof window !== "undefined" && window.location.pathname !== CAMINHO_DA_ABA[tab]) {
+      window.history.pushState({}, "", CAMINHO_DA_ABA[tab]);
     }
   };
 
   useEffect(() => {
-    const handlePopState = () => {
-      const path = window.location.pathname;
-      if (path === "/admin") {
-        setActiveTabState("admin");
-      } else if (path === "/privacy") {
-        setActiveTabState("privacy");
-      } else if (path === "/terms") {
-        setActiveTabState("terms");
-      } else {
-        setActiveTabState("home");
-      }
-    };
+    const handlePopState = () => setActiveTabState(abaDoCaminho(window.location.pathname));
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  // Modo manutenção ligado no painel admin
+  const [manutencao, setManutencao] = useState<{ ativa: boolean; mensagem: string }>({ ativa: false, mensagem: "" });
+  useEffect(() => {
+    lerConfigPublica().then(cfg => {
+      if (cfg) setManutencao({ ativa: cfg.manutencao, mensagem: cfg.mensagemManutencao });
+    });
   }, []);
 
   const [refugioTab, setRefugioTab] = useState<"diario" | "meditacao" | "composicao" | "historia">("diario");
@@ -106,6 +112,38 @@ export default function App() {
     window.addEventListener("barao:session-expired", onSessionExpired);
     return () => window.removeEventListener("barao:session-expired", onSessionExpired);
   }, []);
+
+  // Privacidade, Termos e Admin continuam abertos durante a manutenção
+  const emManutencao = manutencao.ativa && !["admin", "privacy", "terms"].includes(activeTab);
+
+  // Plano e créditos vêm do servidor (pagamento confirmado ou concedido pelo
+  // admin). Corrige a cópia local, que antes podia ser alterada no navegador.
+  useEffect(() => {
+    if (!currentUser) return;
+    let cancelado = false;
+    apiFetch("/api/pagamentos/meu-plano")
+      .then(res => (res.ok ? res.json() : null))
+      .then(dados => {
+        if (cancelado || !dados) return;
+        setCurrentUser(prev => {
+          if (!prev) return prev;
+          const atualizado: User = {
+            ...prev,
+            plan: dados.nivel,
+            planoId: dados.planoId,
+            planoNome: dados.planoNome,
+            planoAte: dados.ate,
+            tokens: dados.tokens
+          };
+          localStorage.setItem(SESSION_USER_KEY, JSON.stringify(atualizado));
+          return atualizado;
+        });
+      })
+      .catch(() => {});
+    return () => {
+      cancelado = true;
+    };
+  }, [currentUser?.id]);
 
   // Keep O Barão's portrait in sync on account changes.
   // O banco de dados é a fonte da verdade: o que estiver salvo lá vale em
@@ -423,7 +461,15 @@ export default function App() {
           ? "relative z-10 flex-1 min-h-0 flex flex-col w-full overflow-hidden text-left"
           : "relative z-10 mx-auto max-w-7xl px-6 pt-8 md:pt-16 text-center"
       }>
-        {activeTab === "home" && (
+        {emManutencao && (
+          <div className="min-h-[60vh] flex flex-col items-center justify-center gap-6 py-16 animate-fade-in">
+            <Moon className="h-10 w-10 text-barao-gold" />
+            <h2 className="font-serif text-3xl text-white">Um momento de quietude</h2>
+            <p className="font-serif italic text-zinc-300 max-w-md">{manutencao.mensagem}</p>
+          </div>
+        )}
+
+        {!emManutencao && activeTab === "home" && (
           <div className="space-y-16 py-4 animate-fade-in">
             {/* Poetic Editorial Slogans Container (Copy translated from meubarao.com) */}
             <section className="space-y-6 max-w-3xl mx-auto py-12 md:py-24">
@@ -588,7 +634,7 @@ export default function App() {
           </div>
         )}
 
-        {activeTab === "dialogo" && (
+        {!emManutencao && activeTab === "dialogo" && (
           <div className="w-full h-full flex-grow overflow-hidden animate-fade-in">
             <BaraoChat 
               currentUser={currentUser} 
@@ -600,7 +646,7 @@ export default function App() {
           </div>
         )}
 
-        {activeTab === "refugio" && (
+        {!emManutencao && activeTab === "refugio" && (
           <div className="animate-fade-in py-4 text-left">
             <div className="max-w-5xl mx-auto mb-8">
               <div className="bg-[#0B0B0B]/90 border border-white/5 rounded-sm p-4 sm:p-6 immersive-corners flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
@@ -708,7 +754,7 @@ export default function App() {
           </div>
         )}
 
-        {activeTab === "universo" && (
+        {!emManutencao && activeTab === "universo" && (
           <div className="animate-fade-in py-4">
             <UserProfilePanel 
               currentUser={currentUser} 
@@ -719,7 +765,7 @@ export default function App() {
           </div>
         )}
 
-        {activeTab === "evolucao" && (
+        {!emManutencao && activeTab === "evolucao" && (
           <div className="animate-fade-in py-4">
             <BaraoEvolucao 
               currentUser={currentUser} 
@@ -729,7 +775,7 @@ export default function App() {
           </div>
         )}
 
-        {activeTab === "meubarao" && (
+        {!emManutencao && activeTab === "meubarao" && (
           <div className="animate-fade-in py-4">
             <MeuBarao
               currentUser={currentUser}
@@ -756,11 +802,9 @@ export default function App() {
 
         {activeTab === "admin" && (
           <div className="animate-fade-in py-4">
-            <BaraoAdminDashboard
-              currentUser={currentUser}
-              onUserUpdate={handleUserUpdate}
-              onBack={() => setActiveTab("home")}
-            />
+            <Suspense fallback={<p className="text-zinc-400 py-16">Abrindo o painel...</p>}>
+              <AdminPainel currentUser={currentUser} onPromptAuth={() => { setAuthInitialMode("login"); setShowAuthModal(true); }} onBack={() => setActiveTab("home")} />
+            </Suspense>
           </div>
         )}
       </main>
