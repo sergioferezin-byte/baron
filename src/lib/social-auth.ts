@@ -29,9 +29,14 @@ interface ProviderConfig {
 // IDs de cliente são públicos (vão dentro do app). Podem ser trocados por
 // variável de ambiente, separados por vírgula, sem mexer no código.
 const GOOGLE_CLIENT_IDS_PADRAO = [
-  // Cliente "Web" (o app inicializa o plugin com ele no Android e no iOS)
+  // Projeto Google Cloud "Meu Barao" (conta sergiobaraoappbarao), desde 1.6.3:
+  // cliente "Web" (o app inicializa o plugin com ele no Android e no iOS)
+  "593670930264-m0ibve8od28ppbv6diea34k6ur69pgpg.apps.googleusercontent.com",
+  // cliente "Meu Barao iOS"
+  "593670930264-hce8jeus3jkftbjtm09thdpsdidvik6k.apps.googleusercontent.com",
+  // Projeto antigo (sem acesso ao console): mantido para quem ainda está na
+  // 1.6.2 conseguir entrar até atualizar o app
   "1024630213933-5j37m7fcnrps0j7a0of4lgicj7hada40.apps.googleusercontent.com",
-  // Cliente "Meu Barão iOS"
   "1024630213933-o3k3f3l0fv4ftcuntaacd61j58d9odnn.apps.googleusercontent.com"
 ];
 const APPLE_CLIENT_IDS_PADRAO = ["br.com.meubarao.app"];
