@@ -42,12 +42,43 @@ import {
   composicoesMusicais
 } from "./src/db/schema.ts";
 import { eq, desc, and } from "drizzle-orm";
+import { limiteDeUso } from "./src/middleware/limiteDeUso.ts";
 
 const app = express();
 const PORT = 3000;
 
 app.use(express.json({ limit: "15mb" }));
 app.use(express.urlencoded({ limit: "15mb", extended: true }));
+
+// Rotas que gastam créditos pagos (ElevenLabs e kie.ai) e aceitam visitantes:
+// limite por IP para ninguém esvaziar os créditos com chamadas em série
+const DEZ_MINUTOS = 10 * 60 * 1000;
+app.use(
+  "/api/voice",
+  limiteDeUso({
+    nome: "voz",
+    maximo: 40,
+    janelaMs: DEZ_MINUTOS,
+    mensagem: "Muitas leituras em pouco tempo. Respire um instante e tente de novo."
+  })
+);
+const limiteImagem = limiteDeUso({
+  nome: "imagem",
+  maximo: 8,
+  janelaMs: DEZ_MINUTOS,
+  mensagem: "Muitas imagens em pouco tempo. Espere alguns minutos para o Barão revelar outra."
+});
+app.use("/api/image/generate", limiteImagem);
+app.use("/api/barao/generate-avatar", limiteImagem);
+app.use(
+  "/api/music/generate",
+  limiteDeUso({
+    nome: "musica",
+    maximo: 4,
+    janelaMs: DEZ_MINUTOS,
+    mensagem: "Muitas canções em pouco tempo. Espere alguns minutos para pedir outra."
+  })
+);
 
 // Global customizable configuration variables (Persisted to admin_configs.json)
 let isMaintenanceMode = false;
@@ -2827,6 +2858,33 @@ app.post("/api/image/generate", async (req, res) => {
       `Scene: ${String(description)}`
     ).slice(0, 990);
 
+    // Legenda: uma frase curta do Barão que acompanha a foto (fora da imagem).
+    // Roda em paralelo com o prompt para não somar tempo de espera.
+    const legendaPromise: Promise<string | null> = callDeepSeek(
+      [
+        {
+          role: "system",
+          content:
+            `Você é o Barão, o companheiro afetuoso de uma mulher. Você está enviando a ela uma foto desta lembrança.\n` +
+            `Escreva UMA frase curta (no máximo 140 caracteres), em português do Brasil, na sua voz: íntima, calorosa e elegante, falando diretamente com ela. ` +
+            `Ela vai aparecer como legenda embaixo da foto. Sem aspas, sem emojis, sem hashtags e sem explicações. Responda só com a frase.`
+        },
+        {
+          role: "user",
+          content: `Título: ${title || "(sem título)"}\nLembrança: ${description}`
+        }
+      ],
+      { temperature: 0.8 }
+    )
+      .then((texto) => {
+        const limpa = texto.trim().replace(/^["'“”«»]+|["'“”«»]+$/g, "").trim();
+        return limpa ? limpa.slice(0, 200) : null;
+      })
+      .catch((legendaErr) => {
+        console.warn("[Image Generate] DeepSeek caption unavailable:", legendaErr);
+        return null;
+      });
+
     // O DeepSeek lê a lembrança (PT) e escreve um prompt fotográfico fiel em
     // inglês (o que os modelos de imagem entendem melhor)
     let prompt = fallbackPrompt();
@@ -2884,8 +2942,14 @@ app.post("/api/image/generate", async (req, res) => {
       });
     }
 
+    // Sem DeepSeek, a legenda é o título da lembrança (quando houver um de verdade)
+    const tituloLimpo = typeof title === "string" ? title.trim() : "";
+    const legenda =
+      (await legendaPromise) ||
+      (tituloLimpo && tituloLimpo !== "Uma lembrança do Barão" ? tituloLimpo : null);
+
     // model/prompt/refs ajudam a diagnosticar gerações fora do esperado
-    res.json({ taskId, model: usedModel, refs: imageInput.length, prompt: prompt });
+    res.json({ taskId, model: usedModel, refs: imageInput.length, prompt: prompt, legenda });
   } catch (error: any) {
     console.error("[Image Generate] Failed:", error);
     res.status(500).json({

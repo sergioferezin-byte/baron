@@ -284,8 +284,14 @@ export async function enviarVideo(arquivo: File): Promise<string> {
   return assinatura.publicUrl as string;
 }
 
+/** Foto revelada pelo Barão e a frase dele que vai como legenda. */
+export interface FotoDoBarao {
+  url: string;
+  legenda: string | null;
+}
+
 /** Pede ao Barão uma foto e acompanha a revelação até ficar pronta. */
-export async function gerarFoto(descricao: string, titulo?: string): Promise<string> {
+export async function gerarFoto(descricao: string, titulo?: string): Promise<FotoDoBarao> {
   const pedido = await postJson(
     "/api/image/generate",
     { description: descricao, title: titulo || "Uma lembrança do Barão" },
@@ -299,12 +305,18 @@ export async function gerarFoto(descricao: string, titulo?: string): Promise<str
     throw new Error(pedido?.error || "Não consegui começar a revelar a foto.");
   }
 
+  const legenda = typeof pedido?.legenda === "string" && pedido.legenda.trim()
+    ? pedido.legenda.trim()
+    : null;
+
   const limite = Date.now() + 120000;
   while (Date.now() < limite) {
     await new Promise(r => setTimeout(r, 3500));
     const resposta = await fetch(`/api/image/status/${pedido.taskId}`);
     const estado = await resposta.json().catch(() => null);
-    if (estado?.state === "success" && estado?.imageUrl) return estado.imageUrl as string;
+    if (estado?.state === "success" && estado?.imageUrl) {
+      return { url: estado.imageUrl as string, legenda };
+    }
     if (estado?.state === "fail") {
       throw new Error(estado?.error || "A revelação não deu certo.");
     }

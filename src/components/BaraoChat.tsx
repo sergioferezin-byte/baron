@@ -6,7 +6,7 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { Message, User } from "../types";
 import { synther } from "../utils/audioSynthesizer";
-import { requestBaraoVoiceUrl } from "../utils/baraoVoice";
+import { requestBaraoVoiceUrl, BARAO_VOICE_UNAVAILABLE } from "../utils/baraoVoice";
 import { 
   Send, 
   Mic, 
@@ -98,6 +98,8 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
   const [isRecording, setIsRecording] = useState(false);
   const [isTTSAutoPlay, setIsTTSAutoPlay] = useState(false);
   const [activeSpeechId, setActiveSpeechId] = useState<string | null>(null);
+  // Mensagem cuja leitura falhou porque a ElevenLabs não respondeu
+  const [voiceUnavailableId, setVoiceUnavailableId] = useState<string | null>(null);
   const [speechError, setSpeechError] = useState<string | null>(null);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [isIncognito, setIsIncognito] = useState(false);
@@ -321,13 +323,15 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
     guardar([...conversa, placeholder]);
 
     gerarFoto(descricao)
-      .then((url) => {
+      .then(({ url, legenda }) => {
         setMessages(prev => {
           const next = prev.map(m =>
             m.id === placeholder.id
               ? {
                   ...m,
                   generating: false,
+                  // A frase do Barão acompanha a foto como legenda
+                  text: legenda || m.text,
                   attachments: [{ name: "Uma lembrança do Barão", type: "image" as const, url }]
                 }
               : m
@@ -1128,6 +1132,7 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
 
     synther.stopSpeaking();
     setActiveSpeechId(id);
+    setVoiceUnavailableId(null);
     const requestId = ++speechRequestRef.current;
 
     // Reaproveita o áudio já gerado para esta mensagem, se existir
@@ -1152,7 +1157,10 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
       }
       synther.playAudioUrl(audioUrl, () => setActiveSpeechId(null));
     } else {
-      synther.speakText(text, undefined, () => setActiveSpeechId(null));
+      // Só a voz do Barão na ElevenLabs: sem ela, avisa em vez de usar outra voz
+      setActiveSpeechId(null);
+      setVoiceUnavailableId(id);
+      setTimeout(() => setVoiceUnavailableId(prev => (prev === id ? null : prev)), 6000);
     }
   };
 
@@ -1385,12 +1393,14 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
         });
       };
 
-      // Voz realista do Barão via kie.ai; navegador como reserva
+      // Voz do Barão na ElevenLabs; sem ela, mostra o texto e o aviso
       const voiceAudioUrl = await requestBaraoVoiceUrl(responseText);
       if (voiceAudioUrl) {
         synther.playAudioUrl(voiceAudioUrl, resumeListening);
       } else {
-        synther.speakText(responseText, undefined, resumeListening);
+        // Não volta a ouvir sozinho: startVoiceListening apagaria o aviso
+        setVoiceError(BARAO_VOICE_UNAVAILABLE);
+        setVoiceState("idle");
       }
 
     } catch (err) {
@@ -1579,6 +1589,11 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
                     </div>
                   )}
                 </div>
+                {voiceError && (
+                  <p role="alert" className="text-[10px] font-mono tracking-wider text-[#CB8684]">
+                    {voiceError}
+                  </p>
+                )}
               </div>
             </div>
 
@@ -1720,15 +1735,18 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
                       {/* Message Bubble with Glassmorphism & text readability enhancements */}
                       <div className={`flex flex-col max-w-[82%] sm:max-w-[75%] ${isUser ? "items-end" : "items-start"}`}>
                         <div
-                          className={`relative px-4 py-3 sm:px-5 sm:py-3.5 rounded-2xl shadow-xl transition-all duration-300 ${
+                          className={`relative flex flex-col px-4 py-3 sm:px-5 sm:py-3.5 rounded-2xl shadow-xl transition-all duration-300 ${
                             isUser
                               ? "bg-zinc-950/70 backdrop-blur-md border border-[#C5A059]/25 text-white rounded-tr-sm"
                               : "bg-black/55 backdrop-blur-md border border-white/5 rounded-tl-sm"
                           }`}
                         >
-                          {/* Text formatting inside mobile text size and spacing */}
+                          {/* Text formatting inside mobile text size and spacing.
+                              Na foto enviada pelo Barão, o texto é a legenda e vai embaixo dela. */}
                           {(msg.generating || msg.text.trim()) && (
-                            <div className={`text-[15.5px] sm:text-[16.5px] leading-relaxed md:leading-[1.75] font-light ${
+                            <div className={`${
+                              !isUser && !msg.generating && !!msg.attachments?.length ? "order-2 mt-2.5" : ""
+                            } text-[15.5px] sm:text-[16.5px] leading-relaxed md:leading-[1.75] font-light ${
                               isUser
                                 ? "font-sans text-zinc-100 block break-words"
                                 : "font-serif italic text-[#E5CD9D] whitespace-pre-line block break-words"
@@ -1745,7 +1763,11 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
                           )}
 
                           {msg.attachments && msg.attachments.length > 0 && (
-                            <div className={`flex flex-col gap-2 max-w-[300px] sm:max-w-md ${msg.text.trim() || msg.generating ? "mt-2.5" : ""}`}>
+                            <div className={`flex flex-col gap-2 max-w-[300px] sm:max-w-md ${
+                              !isUser && !msg.generating
+                                ? "order-1"
+                                : msg.text.trim() || msg.generating ? "mt-2.5" : ""
+                            }`}>
                               {msg.attachments.map((attach, idx) => (
                                 <div key={idx} className="relative overflow-hidden rounded border border-[#C5A059]/25 bg-black/60">
                                   {attach.type === 'image' && (
@@ -1825,6 +1847,11 @@ export default function BaraoChat({ currentUser, onPromptAuth, onTabChange, onUs
                         <span className="mt-1 px-1.5 font-mono text-[9px] text-zinc-500 uppercase tracking-widest font-normal">
                           {msg.timestamp} {msg.isVoice ? "• via Voz" : ""}
                         </span>
+                        {voiceUnavailableId === msg.id && (
+                          <span role="alert" className="mt-1 px-1.5 font-mono text-[9px] text-[#CB8684] tracking-wider">
+                            {BARAO_VOICE_UNAVAILABLE}
+                          </span>
+                        )}
                       </div>
                     </div>
                   );
