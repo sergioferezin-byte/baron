@@ -1276,6 +1276,21 @@ function detectMediaRequestInApp(message: string): boolean {
   return visual && acao;
 }
 
+// Pedido inequívoco de foto ou vídeo do Barão. Nestes casos o link é garantido,
+// mesmo que o modelo ignore a instrução. Falar da própria foto não entra aqui.
+function pedidoDiretoDeMidia(message: string): boolean {
+  const lower = String(message || "").trim().toLowerCase();
+  if (!lower || /\b(minha|minhas|meu|meus)\b/.test(lower)) return false;
+  const midia = "(?:fotos?|fotografias?|imagem|imagens|retratos?|selfies?|v[íi]deos?|videozinho|filminho)";
+  return (
+    new RegExp(`\\b(?:manda|mande|envia|envie|mostra|mostre|grava|grave|faz|fa[çc]a|cria|crie|gera|gere)\\b(?:\\s+\\S+){0,3}?\\s+${midia}\\b`).test(lower) ||
+    new RegExp(`\\b(?:pode|podia|poderia|consegue)\\s+(?:me\\s+|pra\\s+mim\\s+)?(?:enviar|mandar|mostrar|gravar|fazer|criar|gerar|tirar)\\b(?:\\s+\\S+){0,3}?\\s+${midia}\\b`).test(lower) ||
+    new RegExp(`\\b(?:tira|tire)\\s+uma?\\s+${midia}\\b`).test(lower) ||
+    new RegExp(`\\b(?:quero|queria|gostaria)\\b(?:\\s+\\S+){0,3}?\\s+${midia}\\s+(?:seus?|suas?|de\\s+voc[êe])`).test(lower) ||
+    /\bquero\s+ver\s+voc[êe](?![a-zà-ú])/.test(lower)
+  );
+}
+
 // Recebe uma foto já comprimida pelo app, guarda no Storage e devolve a URL.
 app.post("/api/chat/media", async (req, res) => {
   try {
@@ -1625,8 +1640,13 @@ Responda como quem realmente olhou: comente algo específico e sensorial do que 
       (await callDeepSeek(deepSeekMessages, { temperature: 0.9, topP: 0.95 })) ||
       "Estou aqui ouvindo o seu silêncio, de coração aberto. Fale mais comigo sobre o que te toca...";
 
+    const faltouLink =
+      midiaPedidaNoApp && pedidoDiretoDeMidia(message) && !replyText.includes(LINK_SITE_MIDIA);
+
     res.json({
-      text: replyText,
+      text: faltouLink
+        ? `Minhas fotos e meus vídeos eu revelo no nosso espaço na web. Vem me encontrar lá: ${LINK_SITE_MIDIA}`
+        : replyText,
       ...(photoRequest ? { pedirFoto: photoRequest } : {}),
       ...(mediaResumo ? { mediaResumo } : {})
     });
