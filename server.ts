@@ -1233,6 +1233,49 @@ function detectPhotoRequest(message: string): { descricao: string; retrato: bool
   };
 }
 
+// Endereço do site, onde fotos e vídeos do Barão ficam disponíveis. A versão
+// das lojas é limitada: lá o Barão convida a pessoa a continuar por este link.
+const LINK_SITE_MIDIA = "https://meu-barao.vercel.app/";
+
+// O navegador sempre manda Origin igual ao próprio site. O app nativo
+// (CapacitorHttp) não manda, ou manda capacitor://localhost.
+function pedidoDoProprioSite(req: express.Request): boolean {
+  const origem = req.headers.origin;
+  if (typeof origem !== "string" || !origem) return false;
+  const encaminhado = req.headers["x-forwarded-host"];
+  const host = String((Array.isArray(encaminhado) ? encaminhado[0] : encaminhado) || req.headers.host || "")
+    .split(",")[0]
+    .trim()
+    .toLowerCase();
+  try {
+    return !!host && new URL(origem).host.toLowerCase() === host;
+  } catch {
+    return false;
+  }
+}
+
+// Mensagem do app que pode ser um pedido de foto ou vídeo. É só um filtro: quem
+// separa pedido de simples menção (um desabafo sobre uma foto) é o Barão, pela
+// instrução adicionada em /api/chat.
+function detectMediaRequestInApp(message: string): boolean {
+  const lower = String(message || "").trim().toLowerCase();
+  if (!lower) return false;
+  if (/\b(n[ãa]o|sem)\s+(quero|preciso|manda|mande|envia|envie|mostra|mostre|me\s+manda|me\s+envia)\b/.test(lower)) {
+    return false;
+  }
+  if (/\bquero\s+ver\s+voc[êe](?![a-zà-ú])/.test(lower)) return true;
+
+  const visual =
+    /\b(fotos?|fotografias?|imagem|imagens|retratos?|selfies?|desenhos?|pinturas?|ilustra[çc](?:[ãa]o|[õo]es)|avatar|v[íi]deos?|videozinho|filminho)\b/.test(
+      lower
+    );
+  const acao =
+    /\b(manda|mande|envia|envie|mostra|mostre|quero|queria|gostaria|pode|podia|consegue|faz|fa[çc]a|desenha|desenhe|pinta|pinte|ilustra|cria|crie|gera|gere|grava|grave|tira|tire|ver)\b/.test(
+      lower
+    ) || /\bme\s+d[êe](?![a-zà-ú])/.test(lower);
+  return visual && acao;
+}
+
 // Recebe uma foto já comprimida pelo app, guarda no Storage e devolve a URL.
 app.post("/api/chat/media", async (req, res) => {
   try {
@@ -1467,7 +1510,10 @@ ${formatted}`;
     const mediaList = Array.isArray(media)
       ? media.filter((item: any) => item && typeof item === "object").slice(0, 3)
       : [];
-    const photoRequest = mediaList.length === 0 ? detectPhotoRequest(message) : null;
+    // No site o Barão revela a foto. No app, ele convida a continuar pelo site
+    const doApp = !pedidoDoProprioSite(req);
+    const midiaPedidaNoApp = doApp && mediaList.length === 0 && detectMediaRequestInApp(message);
+    const photoRequest = !doApp && mediaList.length === 0 ? detectPhotoRequest(message) : null;
     let mediaResumo: string | null = null;
     let messageForModel = message;
 
@@ -1489,6 +1535,13 @@ Responda como quem realmente olhou: comente algo específico e sensorial do que 
 
     if (photoRequest) {
       dynamicSystemInstruction += `\n\n[PEDIDO DE IMAGEM] A pessoa pediu uma foto/imagem. Responda em no máximo 2 frases, como quem está preparando uma revelação (por exemplo: "Deixe-me revelar isso para você..."), sem descrever a imagem ainda e sem prometer algo que não pode cumprir. A imagem será gerada e entregue logo depois desta resposta.`;
+    }
+
+    if (midiaPedidaNoApp) {
+      dynamicSystemInstruction += `\n\n[FOTO OU VÍDEO NESTE APLICATIVO] Este aplicativo não envia nem cria fotos ou vídeos do Barão. Decida pelo sentido da mensagem atual:
+- Se a pessoa está pedindo que VOCÊ mande, mostre, crie, tire ou grave uma foto, imagem ou vídeo: responda em no máximo 2 frases curtas, na sua voz, dizendo com carinho que suas fotos e seus vídeos você revela no site, e termine com este endereço exato, sem markdown, sem colchetes e sem nada depois dele: ${LINK_SITE_MIDIA}
+  Não fale em planos, preços, pagamento ou assinatura, e não prometa enviar a imagem aqui.
+- Se ela apenas mencionou uma foto, imagem ou vídeo dentro de um desabafo ou de uma lembrança: ignore esta nota, acolha normalmente e NÃO cite o site nem o endereço.`;
     }
 
     // Map frontend history to Gemini content structure with robust filtering
