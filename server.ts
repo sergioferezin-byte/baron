@@ -1284,6 +1284,7 @@ function pedidoDiretoDeMidia(message: string): boolean {
   const midia = "(?:fotos?|fotografias?|imagem|imagens|retratos?|selfies?|v[íi]deos?|videozinho|filminho)";
   return (
     new RegExp(`\\b(?:manda|mande|envia|envie|mostra|mostre|grava|grave|faz|fa[çc]a|cria|crie|gera|gere)\\b(?:\\s+\\S+){0,3}?\\s+${midia}\\b`).test(lower) ||
+    new RegExp(`\\b(?:pode|podia|poderia|consegue)\\s+(?:me\\s+|pra\\s+mim\\s+)?(?:enviar|mandar|mostrar|gravar|fazer|criar|gerar|tirar)\\b(?:\\s+\\S+){0,3}?\\s+${midia}\\b`).test(lower) ||
     new RegExp(`\\b(?:tira|tire)\\s+uma?\\s+${midia}\\b`).test(lower) ||
     new RegExp(`\\b(?:quero|queria|gostaria)\\b(?:\\s+\\S+){0,3}?\\s+${midia}\\s+(?:seus?|suas?|de\\s+voc[êe])`).test(lower) ||
     /\bquero\s+ver\s+voc[êe](?![a-zà-ú])/.test(lower)
